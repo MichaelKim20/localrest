@@ -1303,7 +1303,6 @@ class FiberScheduler : Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
-        yield();
     }
 
     /**
