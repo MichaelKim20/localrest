@@ -29,9 +29,12 @@
  *    (See accompanying file LICENSE_1_0.txt or copy at
  *          http://www.boost.org/LICENSE_1_0.txt)
  */
-module std.concurrency;
+module geod24.concurrency;
+
+import geod24.Channel;
 
 public import std.variant;
+public import std.stdio;
 
 import core.atomic;
 import core.sync.condition;
@@ -1805,6 +1808,7 @@ void yield(T)(T value)
     testScheduler(new ThreadScheduler);
     testScheduler(new FiberScheduler);
 }
+
 ///
 @system unittest
 {
@@ -1852,28 +1856,13 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_lock = new Mutex;
-            m_closed = false;
-
-            if (scheduler is null)
-            {
-                m_putMsg = new Condition(m_lock);
-                m_notFull = new Condition(m_lock);
-            }
-            else
-            {
-                m_putMsg = scheduler.newCondition(m_lock);
-                m_notFull = scheduler.newCondition(m_lock);
-            }
+            m_channel = new WaitableChannel!Message(1024);
         }
 
         ///
         final @property bool isClosed() @safe @nogc pure
         {
-            synchronized (m_lock)
-            {
-                return m_closed;
-            }
+            return m_channel.isClosed;
         }
 
         /*
@@ -1889,11 +1878,11 @@ private
          */
         final void setMaxMsgs(size_t num, bool function(Tid) call) @safe @nogc pure
         {
-            synchronized (m_lock)
-            {
+            //synchronized (m_lock)
+            //{
                 m_maxMsgs = num;
                 m_onMaxMsgs = call;
-            }
+            //}
         }
 
         /*
@@ -1912,36 +1901,7 @@ private
          */
         final void put(ref Message msg)
         {
-            synchronized (m_lock)
-            {
-                // TODO: Generate an error here if m_closed is true, or maybe
-                //       put a message in the caller's queue?
-                if (!m_closed)
-                {
-                    while (true)
-                    {
-                        if (isPriorityMsg(msg))
-                        {
-                            m_sharedPty.put(msg);
-                            m_putMsg.notify();
-                            return;
-                        }
-                        if (!mboxFull() || isControlMsg(msg))
-                        {
-                            m_sharedBox.put(msg);
-                            m_putMsg.notify();
-                            return;
-                        }
-                        if (m_onMaxMsgs !is null && !m_onMaxMsgs(thisTid))
-                        {
-                            return;
-                        }
-                        m_putQueue++;
-                        m_notFull.wait();
-                        m_putQueue--;
-                    }
-                }
-            }
+            m_channel.send(msg);
         }
 
         /*
@@ -2045,67 +2005,22 @@ private
                 }
             }
 
-            bool scan(ref ListT list)
+            bool scan(ref Message msg)
             {
-                for (auto range = list[]; !range.empty;)
+                if (isControlMsg(msg))
                 {
-                    // Only the message handler will throw, so if this occurs
-                    // we can be certain that the message was handled.
-                    scope (failure)
-                        list.removeAt(range);
-
-                    if (isControlMsg(range.front))
+                    if (onControlMsg(msg))
                     {
-                        if (onControlMsg(range.front))
-                        {
-                            // Although the linkDead message is a control message,
-                            // it can be handled by the user.  Since the linkDead
-                            // message throws if not handled, if we get here then
-                            // it has been handled and we can return from receive.
-                            // This is a weird special case that will have to be
-                            // handled in a more general way if more are added.
-                            if (!isLinkDeadMsg(range.front))
-                            {
-                                list.removeAt(range);
-                                continue;
-                            }
-                            list.removeAt(range);
+                        if (!isLinkDeadMsg(msg))
                             return true;
-                        }
-                        range.popFront();
-                        continue;
-                    }
-                    else
-                    {
-                        if (onStandardMsg(range.front))
-                        {
-                            list.removeAt(range);
-                            return true;
-                        }
-                        range.popFront();
-                        continue;
+                        else
+                            return false;
                     }
                 }
-                return false;
-            }
-
-            bool pty(ref ListT list)
-            {
-                if (!list.empty)
+                else
                 {
-                    auto range = list[];
-
-                    if (onStandardMsg(range.front))
-                    {
-                        list.removeAt(range);
+                    if (onStandardMsg(msg))
                         return true;
-                    }
-                    if (range.front.convertsTo!(Throwable))
-                        throw range.front.get!(Throwable);
-                    else if (range.front.convertsTo!(shared(Throwable)))
-                        throw range.front.get!(shared(Throwable));
-                    else
-                        throw new PriorityMessageException(range.front.data);
                 }
                 return false;
             }
@@ -2118,59 +2033,31 @@ private
 
             while (true)
             {
-                ListT arrived;
-
-                if (pty(m_localPty) || scan(m_localBox))
+                Message msg;
+                if (m_channel.receive(&msg))
                 {
-                    return true;
-                }
-                yield();
-                synchronized (m_lock)
-                {
-                    updateMsgCount();
-                    while (m_sharedPty.empty && m_sharedBox.empty)
+                    if (isControlMsg(msg))
                     {
-                        // NOTE: We're notifying all waiters here instead of just
-                        //       a few because the onCrowding behavior may have
-                        //       changed and we don't want to block sender threads
-                        //       unnecessarily if the new behavior is not to block.
-                        //       This will admittedly result in spurious wakeups
-                        //       in other situations, but what can you do?
-                        if (m_putQueue && !mboxFull())
-                            m_notFull.notifyAll();
-                        static if (timedWait)
+                        if (onControlMsg(msg))
                         {
-                            if (period <= Duration.zero || !m_putMsg.wait(period))
-                                return false;
+                            if (!isLinkDeadMsg(msg))
+                                break;
+                            else
+                                continue;
                         }
-                        else
-                        {
-                            m_putMsg.wait();
-                        }
-                    }
-                    m_localPty.put(m_sharedPty);
-                    arrived.put(m_sharedBox);
-                }
-                if (m_localPty.empty)
-                {
-                    scope (exit) m_localBox.put(arrived);
-                    if (scan(arrived))
-                    {
-                        return true;
                     }
                     else
                     {
-                        static if (timedWait)
-                        {
-                            period = limit - MonoTime.currTime;
-                        }
-                        continue;
+                        if (onStandardMsg(msg))
+                            break;
+                        else
+                            continue;
                     }
                 }
-                m_localBox.put(arrived);
-                pty(m_localPty);
-                return true;
+                else
+                    break;
             }
+            return false;
         }
 
         /*
@@ -2189,7 +2076,7 @@ private
                 if (tid == thisInfo.owner)
                     thisInfo.owner = Tid.init;
             }
-
+/*
             static void sweep(ref ListT list)
             {
                 for (auto range = list[]; !range.empty; range.popFront())
@@ -2198,31 +2085,12 @@ private
                         onLinkDeadMsg(range.front);
                 }
             }
-
-            ListT arrived;
-
-            sweep(m_localBox);
-            synchronized (m_lock)
-            {
-                arrived.put(m_sharedBox);
-                m_closed = true;
-            }
-            m_localBox.clear();
-            sweep(arrived);
+*/
+            m_channel.close ();
         }
 
     private:
         // Routines involving local data only, no lock needed.
-
-        bool mboxFull() @safe @nogc pure nothrow
-        {
-            return m_maxMsgs && m_maxMsgs <= m_localMsgs + m_sharedBox.length;
-        }
-
-        void updateMsgCount() @safe @nogc pure nothrow
-        {
-            m_localMsgs = m_localBox.length;
-        }
 
         bool isControlMsg(ref Message msg) @safe @nogc pure nothrow
         {
@@ -2240,199 +2108,11 @@ private
         }
 
         alias OnMaxFn = bool function(Tid);
-        alias ListT = List!(Message);
 
-        ListT m_localBox;
-        ListT m_localPty;
-
-        Mutex m_lock;
-        Condition m_putMsg;
-        Condition m_notFull;
-        size_t m_putQueue;
-        ListT m_sharedBox;
-        ListT m_sharedPty;
         OnMaxFn m_onMaxMsgs;
-        size_t m_localMsgs;
         size_t m_maxMsgs;
-        bool m_closed;
-    }
 
-    /*
-     *
-     */
-    struct List(T)
-    {
-        struct Range
-        {
-            import std.exception : enforce;
-
-            @property bool empty() const
-            {
-                return !m_prev.next;
-            }
-
-            @property ref T front()
-            {
-                enforce(m_prev.next, "invalid list node");
-                return m_prev.next.val;
-            }
-
-            @property void front(T val)
-            {
-                enforce(m_prev.next, "invalid list node");
-                m_prev.next.val = val;
-            }
-
-            void popFront()
-            {
-                enforce(m_prev.next, "invalid list node");
-                m_prev = m_prev.next;
-            }
-
-            private this(Node* p)
-            {
-                m_prev = p;
-            }
-
-            private Node* m_prev;
-        }
-
-        void put(T val)
-        {
-            put(newNode(val));
-        }
-
-        void put(ref List!(T) rhs)
-        {
-            if (!rhs.empty)
-            {
-                put(rhs.m_first);
-                while (m_last.next !is null)
-                {
-                    m_last = m_last.next;
-                    m_count++;
-                }
-                rhs.m_first = null;
-                rhs.m_last = null;
-                rhs.m_count = 0;
-            }
-        }
-
-        Range opSlice()
-        {
-            return Range(cast(Node*)&m_first);
-        }
-
-        void removeAt(Range r)
-        {
-            import std.exception : enforce;
-
-            assert(m_count);
-            Node* n = r.m_prev;
-            enforce(n && n.next, "attempting to remove invalid list node");
-
-            if (m_last is m_first)
-                m_last = null;
-            else if (m_last is n.next)
-                m_last = n; // nocoverage
-            Node* to_free = n.next;
-            n.next = n.next.next;
-            freeNode(to_free);
-            m_count--;
-        }
-
-        @property size_t length()
-        {
-            return m_count;
-        }
-
-        void clear()
-        {
-            m_first = m_last = null;
-            m_count = 0;
-        }
-
-        @property bool empty()
-        {
-            return m_first is null;
-        }
-
-    private:
-        struct Node
-        {
-            Node* next;
-            T val;
-
-            this(T v)
-            {
-                val = v;
-            }
-        }
-
-        static shared struct SpinLock
-        {
-            void lock() { while (!cas(&locked, false, true)) { Thread.yield(); } }
-            void unlock() { atomicStore!(MemoryOrder.rel)(locked, false); }
-            bool locked;
-        }
-
-        static shared SpinLock sm_lock;
-        static shared Node* sm_head;
-
-        Node* newNode(T v)
-        {
-            Node* n;
-            {
-                sm_lock.lock();
-                scope (exit) sm_lock.unlock();
-
-                if (sm_head)
-                {
-                    n = cast(Node*) sm_head;
-                    sm_head = sm_head.next;
-                }
-            }
-            if (n)
-            {
-                import std.conv : emplace;
-                emplace!Node(n, v);
-            }
-            else
-            {
-                n = new Node(v);
-            }
-            return n;
-        }
-
-        void freeNode(Node* n)
-        {
-            // destroy val to free any owned GC memory
-            destroy(n.val);
-
-            sm_lock.lock();
-            scope (exit) sm_lock.unlock();
-
-            auto sn = cast(shared(Node)*) n;
-            sn.next = sm_head;
-            sm_head = sn;
-        }
-
-        void put(Node* n)
-        {
-            m_count++;
-            if (!empty)
-            {
-                m_last.next = n;
-                m_last = n;
-                return;
-            }
-            m_first = n;
-            m_last = n;
-        }
-
-        Node* m_first;
-        Node* m_last;
-        size_t m_count;
+        WaitableChannel!Message m_channel;
     }
 }
 
