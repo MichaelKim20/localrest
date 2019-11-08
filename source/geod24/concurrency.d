@@ -925,51 +925,6 @@ private
     }
 }
 
-/**
- * Sets a maximum mailbox size.
- *
- * Sets a limit on the maximum number of user messages allowed in the mailbox.
- * If this limit is reached, the caller attempting to add a new message will
- * execute the behavior specified by doThis.  If messages is zero, the mailbox
- * is unbounded.
- *
- * Params:
- *  tid      = The Tid of the thread for which this limit should be set.
- *  messages = The maximum number of messages or zero if no limit.
- *  doThis   = The behavior executed when a message is sent to a full
- *             mailbox.
- */
-void setMaxMailboxSize(Tid tid, size_t messages, OnCrowding doThis) @safe pure
-{
-    final switch (doThis)
-    {
-    case OnCrowding.block:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingBlock);
-    case OnCrowding.throwException:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingThrow);
-    case OnCrowding.ignore:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingIgnore);
-    }
-}
-
-/**
- * Sets a maximum mailbox size.
- *
- * Sets a limit on the maximum number of user messages allowed in the mailbox.
- * If this limit is reached, the caller attempting to add a new message will
- * execute onCrowdingDoThis.  If messages is zero, the mailbox is unbounded.
- *
- * Params:
- *  tid      = The Tid of the thread for which this limit should be set.
- *  messages = The maximum number of messages or zero if no limit.
- *  onCrowdingDoThis = The routine called when a message is sent to a full
- *                     mailbox.
- */
-void setMaxMailboxSize(Tid tid, size_t messages, bool function(Tid) onCrowdingDoThis)
-{
-    tid.mbox.setMaxMsgs(messages, onCrowdingDoThis);
-}
-
 private
 {
     __gshared Tid[string] tidByName;
@@ -1848,40 +1803,19 @@ private
      * A MessageBox is a message queue for one thread.  Other threads may send
      * messages to this owner by calling put(), and the owner receives them by
      * calling get().  The put() call is therefore effectively shared and the
-     * get() call is effectively local.  setMaxMsgs may be used by any thread
-     * to limit the size of the message queue.
+     * get() call is effectively local.
      */
     class MessageBox
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new WaitableChannel!Message(1024);
+            m_channel = new Channel!Message(1024);
         }
 
         ///
         final @property bool isClosed() @safe @nogc pure
         {
             return m_channel.isClosed;
-        }
-
-        /*
-         * Sets a limit on the maximum number of user messages allowed in the
-         * mailbox.  If this limit is reached, the caller attempting to add
-         * a new message will execute call.  If num is zero, there is no limit
-         * on the message queue.
-         *
-         * Params:
-         *  num  = The maximum size of the queue or zero if the queue is
-         *         unbounded.
-         *  call = The routine to call when the queue is full.
-         */
-        final void setMaxMsgs(size_t num, bool function(Tid) call) @safe @nogc pure
-        {
-            //synchronized (m_lock)
-            //{
-                m_maxMsgs = num;
-                m_onMaxMsgs = call;
-            //}
         }
 
         /*
@@ -2106,12 +2040,7 @@ private
             return msg.type == MsgType.linkDead;
         }
 
-        alias OnMaxFn = bool function(Tid);
-
-        OnMaxFn m_onMaxMsgs;
-        size_t m_maxMsgs;
-
-        WaitableChannel!Message m_channel;
+        Channel!Message m_channel;
     }
 }
 
@@ -2150,7 +2079,6 @@ private
 
         // Run the test again with a limited mailbox size.
         tid = spawn(&testfn, thisTid);
-        setMaxMailboxSize(tid, 2, OnCrowding.block);
         runTest(tid);
     }
 

@@ -12,120 +12,12 @@
 
 module geod24.Channel;
 
-import geod24.Queue;
-
 import std.container;
 import std.range;
+import std.variant;
 
 import core.sync.mutex;
 import core.thread;
-
-/*******************************************************************************
-
-    A interface of channel
-
-*******************************************************************************/
-
-public interface Channel (T)
-{
-    /// Send data `elem`.
-    public bool send (T elem);
-
-    /// Write the data received in `elem`
-    public bool receive (T* elem);
-}
-
-/*******************************************************************************
-
-    This channel use `NonBlockingQueue`. This is not uses `Lock`
-
-*******************************************************************************/
-
-public class NonBlockingChannel (T) : Channel!T
-{
-    /// Non blocking queue
-    private NonBlockingQueue!T queue;
-
-    /// Ctor
-    public this ()
-    {
-        this.queue = new NonBlockingQueue!T;
-    }
-
-    /***************************************************************************
-
-        Send data `elem`.
-
-        Params:
-            elem = value to send
-
-        Return:
-            true if the sending is successful, otherwise false
-
-    ***************************************************************************/
-
-    public bool send (T elem)
-    {
-        this.queue.enqueue(elem);
-        return true;
-    }
-
-    /***************************************************************************
-
-        Write the data received in `elem`
-
-        Params:
-            elem = value to receive
-
-        Return:
-            true if the receiving is successful, otherwise false
-
-    ***************************************************************************/
-
-    public bool receive (T* elem)
-    {
-        *elem = this.queue.dequeue();
-        return true;
-    }
-}
-
-/// test of `NonBlockingChannel`, data type is `int`
-unittest
-{
-    NonBlockingChannel!int in_channel = new NonBlockingChannel!int();
-    NonBlockingChannel!int out_channel = new NonBlockingChannel!int();
-
-    new Thread({
-        int x;
-        in_channel.receive(&x);
-        int y = x * x * x;
-        out_channel.send(y);
-    }).start();
-
-    in_channel.send(3);
-    int res;
-    out_channel.receive(&res);
-    assert(res == 27);
-}
-
-/// test of `NonBlockingChannel`, data type is `string`
-unittest
-{
-    NonBlockingChannel!string in_channel = new NonBlockingChannel!string();
-    NonBlockingChannel!string out_channel = new NonBlockingChannel!string();
-
-    new Thread({
-        string name;
-        in_channel.receive(&name);
-        string greeting = "Hi " ~ name;
-        out_channel.send(greeting);
-    }).start();
-
-    in_channel.send("Tom");
-    string res;
-    out_channel.receive(&res);
-    assert(res == "Hi Tom");
-}
 
 /*******************************************************************************
 
@@ -142,7 +34,7 @@ unittest
 
 *******************************************************************************/
 
-public class WaitableChannel (T) : Channel!T
+public class Channel (T)
 {
     /// closed
     private bool closed;
@@ -200,10 +92,10 @@ public class WaitableChannel (T) : Channel!T
         {
             SudoFiber!T sf = this.recvq.front;
             this.recvq.removeFront();
-
             this.mutex.unlock();
 
-            *(sf.elem_ptr) = elem;
+         *(sf.elem_ptr) = elem;
+
             if (sf.fiber !is null)
                 sf.fiber.call();
             else if (sf.swdg !is null)
@@ -419,7 +311,7 @@ private struct SudoFiber (T)
 /// Without a queue, it's impossible on a single thread.
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(10);
+    Channel!int channel = new Channel!int(10);
 
     new Fiber(
     {
@@ -437,7 +329,7 @@ unittest
 /// and register Fiber from the Thread.
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(0);
+    Channel!int channel = new Channel!int(0);
 
     //channel.send(42); // => to be block
     //int res;
@@ -448,7 +340,7 @@ unittest
 /// If you call it using a fiber, it won't block.
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(0);
+    Channel!int channel = new Channel!int(0);
 
     new Fiber(
     {
@@ -463,7 +355,7 @@ unittest
 /// The size of the data buffer is 10
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(10);
+    Channel!int channel = new Channel!int(10);
 
     foreach (int idx; 0 .. 10)
         channel.send(idx);
@@ -480,8 +372,8 @@ unittest
 /// Multi-thread data type is int
 unittest
 {
-    WaitableChannel!int in_channel = new WaitableChannel!int(5);
-    WaitableChannel!int out_channel = new WaitableChannel!int(5);
+    Channel!int in_channel = new Channel!int(5);
+    Channel!int out_channel = new Channel!int(5);
 
     new Thread({
         int x;
@@ -498,8 +390,8 @@ unittest
 /// Multi-thread data type is string
 unittest
 {
-    WaitableChannel!string in_channel = new WaitableChannel!string(5);
-    WaitableChannel!string out_channel = new WaitableChannel!string(5);
+    Channel!string in_channel = new Channel!string(5);
+    Channel!string out_channel = new Channel!string(5);
 
     new Thread({
         string name;
@@ -517,7 +409,7 @@ unittest
 /// When the channel is closed, `receive` returns false;
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(5);
+    Channel!int channel = new Channel!int(5);
 
     int res;
     channel.send(1);
@@ -531,8 +423,8 @@ unittest
 /// Multi fiber, single thread data type is int
 unittest
 {
-    WaitableChannel!int in_channel = new WaitableChannel!int(5);
-    WaitableChannel!int out_channel = new WaitableChannel!int(5);
+    Channel!int in_channel = new Channel!int(5);
+    Channel!int out_channel = new Channel!int(5);
 
     auto fiber1 = new Fiber(
     {
@@ -561,7 +453,7 @@ unittest
 /// Send data `Thread` to `Fiber`
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(5);
+    Channel!int channel = new Channel!int(5);
 
     auto fiber = new Fiber(
     {
@@ -587,7 +479,7 @@ unittest
 /// Send data `Fiber` to `Thread`
 unittest
 {
-    WaitableChannel!int channel = new WaitableChannel!int(5);
+    Channel!int channel = new Channel!int(5);
 
     auto fiber = new Fiber(
     {
@@ -612,7 +504,8 @@ unittest
     thread.start();
 }
 
-// Benchmark of NonBlockingChannel and WaitableChannel
+// Benchmark of NonBlockingChannel and Channel
+version (none)
 unittest
 {
     ///  Start `writers` amount of threads to write into a queue.
@@ -691,41 +584,40 @@ unittest
 
     void f0 ()
     {
-        NonBlockingChannel!int channel = new NonBlockingChannel!int();
+        Channel!int channel = new Channel!int(10);
         test_run(channel, writers, readers, count);
     }
 
     void f1 ()
     {
-        WaitableChannel!int channel = new WaitableChannel!int(10);
+        Channel!int channel = new Channel!int(20);
         test_run(channel, writers, readers, count);
     }
 
     void f2 ()
     {
-        WaitableChannel!int channel = new WaitableChannel!int(20);
-        test_run(channel, writers, readers, count);
-    }
-
-    void f3 ()
-    {
-        WaitableChannel!int channel = new WaitableChannel!int(50);
+        Channel!int channel = new Channel!int(50);
         test_run(channel, writers, readers, count);
     }
 
     import std.datetime.stopwatch : benchmark;
-    auto r = benchmark!(f0, f1, f2, f3)(3);
-/*
+    auto r = benchmark!(f0, f1, f2)(3);
+
     import std.stdio;
     writeln(r[0]);
     writeln(r[1]);
     writeln(r[2]);
-    writeln(r[3]);
-*/
-/* result
-70 ms, 408 μs, and 3 hnsecs
-696 ms, 99 μs, and 8 hnsecs
-498 ms, 76 μs, and 4 hnsecs
-303 ms, 522 μs, and 5 hnsecs
-*/
 }
+
+/*
+unittest
+{
+    static struct NonOverwriteable
+    {
+        const(char[]) value;
+    }
+
+    NonOverwriteable val;
+    val = val.init;
+}
+*/

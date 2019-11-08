@@ -197,7 +197,7 @@ class BaseFiberScheduler : C.Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
-        yield();
+        //yield();
     }
 
     /**
@@ -997,7 +997,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-
+/*
 /// Simple usage example
 unittest
 {
@@ -1806,3 +1806,4 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
+*/
