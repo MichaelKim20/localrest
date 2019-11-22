@@ -679,10 +679,6 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
-        // we need to keep track of messages which were ignored when
-        // node.sleep() was used, and then handle each message in sequence.
-        Variant[] await_msgs;
-
         try scheduler.start(() {
                 bool terminated = false;
                 while (!terminated)
@@ -701,25 +697,32 @@ public final class RemoteAPI (API) : API
                         },
                         (Response res) {
                             if (!isSleeping())
+                            {
                                 handle(res);
+                            }
                             else if (!control.drop)
-                                await_msgs ~= Variant(res);
+                            {
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        Fiber.yield();
+                                    handle(res);
+                                });
+                            }
                         },
-                        (Command cmd)
-                        {
+                        (Command cmd) {
                             if (!isSleeping())
+                            {
                                 handle(cmd);
+                            }
                             else if (!control.drop)
-                                await_msgs ~= Variant(cmd);
+                            {
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        Fiber.yield();
+                                    handle(cmd);
+                                });
+                            }
                         });
-
-                    // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
-                    {
-                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
-                        await_msgs.length = 0;
-                        assumeSafeAppend(await_msgs);
-                    }
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
