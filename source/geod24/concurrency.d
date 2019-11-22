@@ -99,7 +99,6 @@ private
     enum MsgType
     {
         standard,
-        priority,
         linkDead,
     }
 
@@ -316,14 +315,16 @@ class TidMissingException : Exception
 struct Tid
 {
 private:
-    this(MessageBox m) @safe pure nothrow @nogc
+    this (MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
+        timeout = Duration.init;
     }
 
     MessageBox mbox;
 
 public:
+    Duration timeout;
 
     /**
      * Generate a convenient string for identifying this Tid.  This is only
@@ -332,12 +333,17 @@ public:
      * that a Tid executed in the future will have the same toString() output
      * as another Tid that has already terminated.
      */
-    void toString(scope void delegate(const(char)[]) sink)
+    void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
         formattedWrite(sink, "Tid(%x)", cast(void*) mbox);
     }
 
+    void setTimeout (Duration d) @safe pure nothrow @nogc
+    {
+        this.timeout = d;
+        mbox.setTimeout(d);
+    }
 }
 
 @system unittest
@@ -604,47 +610,43 @@ if (isSpawnable!(F, T))
     static assert( __traits(compiles, spawn(callable11, 11)));
 }
 
+
+enum SendStatus
+{
+    success,
+    queue,
+    timeout,
+    closed,
+}
+
 /**
  * Places the values as a message at the back of tid's message queue.
  *
  * Sends the supplied value to the thread represented by tid.  As with
  * $(REF spawn, std,concurrency), `T` must not have unshared aliasing.
  */
-void send(T...)(Tid tid, T vals)
+SendStatus send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(tid, vals);
-}
-
-/**
- * Places the values as a message on the front of tid's message queue.
- *
- * Send a message to `tid` but place it at the front of `tid`'s message
- * queue instead of at the back.  This function is typically used for
- * out-of-band communication, to signal exceptional conditions, etc.
- */
-void prioritySend(T...)(Tid tid, T vals)
-{
-    static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(MsgType.priority, tid, vals);
+    return _send(tid, vals);
 }
 
 /*
  * ditto
  */
-private void _send(T...)(Tid tid, T vals)
+private SendStatus _send(T...)(Tid tid, T vals)
 {
-    _send(MsgType.standard, tid, vals);
+    return _send(MsgType.standard, tid, vals);
 }
 
 /*
  * Implementation of send.  This allows parameter checking to be different for
  * both Tid.send() and .send().
  */
-private void _send(T...)(MsgType type, Tid tid, T vals)
+private SendStatus _send(T...)(MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
-    tid.mbox.put(msg);
+    return tid.mbox.put(msg);
 }
 
 /**
@@ -1813,6 +1815,12 @@ private
             this.mutex = new Mutex();
             this.qsize = 64;
             this.closed = false;
+            this.timeout = Duration.init;
+        }
+
+        public void setTimeout (Duration d) @safe pure nothrow @nogc
+        {
+            this.timeout = d;
         }
 
         ///
@@ -1824,7 +1832,7 @@ private
             }
         }
 
-        private bool _put (ref Message msg)
+        private SendStatus _put (ref Message msg)
         {
             import std.algorithm;
             import std.range : popBackN, walkLength;
@@ -1833,7 +1841,7 @@ private
             if (this.closed)
             {
                 this.mutex.unlock();
-                return false;
+                return SendStatus.closed;
             }
 
             if (this.recvq[].walkLength > 0)
@@ -1847,14 +1855,14 @@ private
 
                 this.mutex.unlock();
 
-                return true;
+                return SendStatus.success;
             }
 
             if (this.queue[].walkLength < this.qsize)
             {
                 this.queue.insertBack(msg);
                 this.mutex.unlock();
-                return true;
+                return SendStatus.queue;
             }
 
             shared(bool) is_waiting = true;
@@ -1865,19 +1873,49 @@ private
             SudoFiber new_sf;
             new_sf.msg = msg;
             new_sf.swdg = &stopWait1;
+            new_sf.create_time = MonoTime.currTime;
 
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
 
-            while (is_waiting)
+            if (this.timeout > Duration.init)
             {
-                if (Fiber.getThis() !is null)
-                    Fiber.yield();
-                else
-                    Thread.sleep(1.msecs);
-            }
+                auto start = MonoTime.currTime;
+                while (is_waiting)
+                {
+                    auto end = MonoTime.currTime();
+                    auto elapsed = end - start;
+                    if (elapsed > this.timeout)
+                    {
+                        // remove timeout element
+                        this.mutex.lock();
+                        auto range = find(this.sendq[], new_sf);
+                        if (!range.empty)
+                        {
+                            popBackN(range, range.walkLength-1);
+                            this.sendq.remove(range);
+                        }
+                        scope(exit) this.mutex.unlock();
+                        return SendStatus.timeout;
+                    }
 
-            return true;
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(1.msecs);
+                }
+            }
+            else
+            {
+                while (is_waiting)
+                {
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(1.msecs);
+                }
+            }
+            return SendStatus.success;
         }
 
         private bool _get (Message* msg)
@@ -1971,7 +2009,7 @@ private
          * Throws:
          *  An exception if the queue is full and onCrowdingDoThis throws.
          */
-        public bool put (ref Message msg)
+        public SendStatus put (ref Message msg)
         {
             return this._put(msg);
         }
@@ -2217,6 +2255,8 @@ private
 
         /// collection of recv waiters
         DList!SudoFiber recvq;
+
+        Duration timeout;
 
         bool timed_wait;
 

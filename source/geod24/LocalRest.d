@@ -527,6 +527,7 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
+        childTid.setTimeout(timeout);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -769,6 +770,8 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+
+        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -952,37 +955,57 @@ public final class RemoteAPI (API) : API
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
+                        MonoTime start_time = MonoTime.currTime;
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                        C.send(this.childTid, command);
+                        auto status = C.send(this.childTid, command);
+                        MonoTime end_time = MonoTime.currTime;
 
-                        // for the main thread, we run the "event loop" until
-                        // the request we're interested in receives a response.
-                        if (is_main_thread)
+                        if ((status == C.SendStatus.queue) || (status == C.SendStatus.success))
                         {
-                            bool terminated = false;
-                            runTask(() {
-                                while (!terminated)
-                                {
-                                    C.receiveTimeout(10.msecs,
-                                        (Response res) {
-                                            scheduler.pending = res;
-                                            scheduler.waiting[res.id].c.notify();
-                                        });
+                            Duration timeout = this.timeout;
+                            if (this.timeout != Duration.init)
+                            {
+                                timeout = this.timeout - (end_time - start_time);
+                                if (timeout.isNegative)
+                                    timeout = Duration.init;
+                            }
 
-                                    scheduler.yield();
-                                }
-                            });
+                            // for the main thread, we run the "event loop" until
+                            // the request we're interested in receives a response.
+                            if (is_main_thread)
+                            {
+                                bool terminated = false;
+                                runTask(() {
+                                    while (!terminated)
+                                    {
+                                        C.receiveTimeout(10.msecs,
+                                            (Response res) {
+                                                if (scheduler !is null)
+                                                {
+                                                    scheduler.pending = res;
+                                                    scheduler.waiting[res.id].c.notify();
+                                                }
+                                            });
+                                        if (scheduler !is null)
+                                            scheduler.yield();
+                                    }
+                                });
 
-                            Response res;
-                            scheduler.start(() {
-                                res = scheduler.waitResponse(command.id, this.timeout);
-                                terminated = true;
-                            });
-                            return res;
+                                Response res;
+                                scheduler.start(() {
+                                    res = scheduler.waitResponse(command.id, timeout);
+                                    terminated = true;
+                                });
+                                return res;
+                            }
+                            else
+                            {
+                                return scheduler.waitResponse(command.id, timeout);
+                            }
                         }
                         else
                         {
-                            return scheduler.waitResponse(command.id, this.timeout);
+                            return Response(Status.Timeout, command.id);
                         }
                     }();
 
@@ -1244,7 +1267,6 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
 }
 
-
 /// Nodes can start tasks
 unittest
 {
@@ -1322,7 +1344,7 @@ unittest
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
 }
-/*
+
 // Simulate temporary outage
 unittest
 {
@@ -1373,11 +1395,11 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    n1.sleep(3.seconds, true);
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
+    Thread.sleep(3.seconds);
     assert(3 == n1.call());
 
     // Debug output, uncomment if needed
@@ -1721,7 +1743,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(20.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -1774,7 +1796,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
-
+/*
 // Test explicit shutdown
 unittest
 {
