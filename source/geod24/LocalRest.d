@@ -688,6 +688,7 @@ public final class RemoteAPI (API) : API
                         (C.OwnerTerminated e) { terminated = true; },
                         (ShutdownCommand e) {
                             terminated = true;
+                            C.thisTid().shutdowned = true;
                         },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
@@ -814,6 +815,7 @@ public final class RemoteAPI (API) : API
         public void shutdown () @trusted
         {
             C.send(this.childTid, ShutdownCommand());
+            this.childTid.shutdowned = true;
         }
 
         /***********************************************************************
@@ -948,6 +950,9 @@ public final class RemoteAPI (API) : API
                         scheduler = new LocalScheduler;
                         is_main_thread = true;
                     }
+
+                    if (this.childTid.shutdowned)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
 
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
@@ -1761,6 +1766,7 @@ unittest
 {
     static import geod24.concurrency;
     import std.exception;
+    import std.stdio;
 
     __gshared C.Tid node_tid;
 
@@ -1796,7 +1802,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
-/*
+
 // Test explicit shutdown
 unittest
 {
@@ -1829,4 +1835,3 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
-*/
