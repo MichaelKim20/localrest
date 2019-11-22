@@ -1026,7 +1026,6 @@ unittest
     test.ctrl.shutdown();
 }
 
-/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -1320,7 +1319,7 @@ unittest
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
 }
-
+/*
 // Simulate temporary outage
 unittest
 {

@@ -107,6 +107,7 @@ private
     {
         MsgType type;
         Variant data;
+        MonoTime create_time;
 
         this(T...)(MsgType t, T vals) if (T.length > 0)
         {
@@ -122,6 +123,7 @@ private
                 type = t;
                 data = Tuple!(T)(vals);
             }
+            create_time = MonoTime.currTime;
         }
 
         @property auto convertsTo(T...)()
@@ -1900,6 +1902,12 @@ private
 
                 this.mutex.unlock();
 
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(sf.msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
+
                 return true;
             }
 
@@ -1909,6 +1917,12 @@ private
                 *msg = this.queue.front;
                 this.queue.removeFront();
                 this.mutex.unlock();
+
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
 
                 return true;
             }
@@ -1921,6 +1935,7 @@ private
             SudoFiber new_sf;
             new_sf.msg_ptr = msg;
             new_sf.swdg = &stopWait1;
+            new_sf.create_time = MonoTime.currTime;
 
             this.recvq.insertBack(new_sf);
             this.mutex.unlock();
@@ -1931,6 +1946,12 @@ private
                     Fiber.yield();
                 else
                     Thread.sleep(1.msecs);
+            }
+
+            if (this.timed_wait)
+            {
+                this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+                this.timed_wait = false;
             }
 
             return true;
@@ -1981,11 +2002,17 @@ private
             {
                 alias Ops = AliasSeq!(T[1 .. $]);
                 alias ops = vals[1 .. $];
+
+                this.timed_wait = true;
+                this.timed_wait_period = vals[0];
             }
             else
             {
                 alias Ops = AliasSeq!(T);
                 alias ops = vals[0 .. $];
+
+                this.timed_wait = false;
+                this.timed_wait_period = Duration.init;
             }
 
             bool onStandardMsg(ref Message msg)
@@ -2090,6 +2117,19 @@ private
             return false;
         }
 
+        private void waitFromBase(MonoTime base, Duration period)
+        {
+            if (this.timed_wait_period > Duration.zero)
+            {
+                for (auto limit = base + period;
+                    !period.isNegative;
+                    period = limit - MonoTime.currTime)
+                {
+                    yield();
+                }
+            }
+        }
+
         /*
          * Called on thread termination.  This routine processes any remaining
          * control messages, clears out message queues, and sets a flag to
@@ -2177,6 +2217,12 @@ private
 
         /// collection of recv waiters
         DList!SudoFiber recvq;
+
+        bool timed_wait;
+
+        Duration timed_wait_period;
+        
+        MonoTime limit;
     }
 
     private alias StopWaitDg = void delegate ();
@@ -2187,6 +2233,7 @@ private
         public Message  msg;
         public Message* msg_ptr;
         public StopWaitDg swdg;
+        public MonoTime create_time;
     }
 }
 
