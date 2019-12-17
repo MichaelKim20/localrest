@@ -2,21 +2,22 @@
 
     Registry implementation for multi-threaded access
 
-    This registry allows to look up a `Tid` based on a `string`.
+    This registry allows to look up a `MessageDispatcher` based on a `string`.
     It is extracted from the `std.concurrency` module to make it reusable
 
 *******************************************************************************/
 
+
 module geod24.Registry;
 
 import core.sync.mutex;
-import geod24.concurrency;
+import geod24.MessageDispatcher;
 
 /// Ditto
 public shared struct Registry
 {
-    private Tid[string] tidByName;
-    private string[][Tid] namesByTid;
+    private MessageDispatcher[string] messageDispatcherByName;
+    private string[][MessageDispatcher] namesByMessageDispatcher;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -26,55 +27,55 @@ public shared struct Registry
     }
 
     /**
-     * Gets the Tid associated with name.
+     * Gets the MessageDispatcher associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Tid or Tid.init if name is not registered.
+     *  The associated MessageDispatcher or MessageDispatcher.init if name is not registered.
      */
-    Tid locate(string name)
+    MessageDispatcher locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
-                return *cast(Tid*)tid;
-            return Tid.init;
+            if (shared(MessageDispatcher)* msg_dispatcher = name in this.messageDispatcherByName)
+                return *cast(MessageDispatcher*)msg_dispatcher;
+            return null;
         }
     }
 
     /**
-     * Associates name with tid.
+     * Associates name with MessageDispatcher.
      *
-     * Associates name with tid in a process-local map.  When the thread
-     * represented by tid terminates, any names associated with it will be
+     * Associates name with MessageDispatcher in a process-local map.  When the thread
+     * represented by MessageDispatcher terminates, any names associated with it will be
      * automatically unregistered.
      *
      * Params:
-     *  name = The name to associate with tid.
-     *  tid  = The tid register by name.
+     *  name = The name to associate with MessageDispatcher.
+     *  m  = The MessageDispatcher register by name.
      *
      * Returns:
-     *  true if the name is available and tid is not known to represent a
+     *  true if the name is available and MessageDispatcher is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Tid tid)
+    bool register(string name, MessageDispatcher msg_dispatcher)
     {
         synchronized (registryLock)
         {
-            if (name in tidByName)
+            if (name in messageDispatcherByName)
                 return false;
-            if (tid.mbox.isClosed)
+            if (msg_dispatcher.mbox.isClosed)
                 return false;
-            this.namesByTid[tid] ~= name;
-            this.tidByName[name] = cast(shared)tid;
+            this.namesByMessageDispatcher[msg_dispatcher] ~= name;
+            this.messageDispatcherByName[name] = cast(shared)msg_dispatcher;
             return true;
         }
     }
 
     /**
-     * Removes the registered name associated with a tid.
+     * Removes the registered name associated with a MessageDispatcher.
      *
      * Params:
      *  name = The name to unregister.
@@ -89,12 +90,12 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
+            if (shared(MessageDispatcher)* msg_dispatcher = name in this.messageDispatcherByName)
             {
-                auto allNames = *cast(Tid*)tid in this.namesByTid;
+                auto allNames = *cast(MessageDispatcher*)msg_dispatcher in this.namesByMessageDispatcher;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.tidByName.remove(name);
+                this.messageDispatcherByName.remove(name);
                 return true;
             }
             return false;
