@@ -80,28 +80,11 @@ module geod24.LocalRest;
 
 import vibe.data.json;
 
-static import C = geod24.concurrency;
+static import C = geod24.MessageDispatcher;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-
 import core.thread;
 import core.time;
-
-
-/// Data sent by the caller
-private struct Command
-{
-    /// Tid of the sender thread (cannot be JSON serialized)
-    C.Tid sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
-    /// Method to call
-    string method;
-    /// Arguments to the method, JSON formatted
-    string args;
-}
 
 /// Ask the node to exhibit a certain behavior for a given time
 private struct TimeCommand
@@ -127,34 +110,6 @@ private struct FilterAPI
     string pretty_func;
 }
 
-/// Status of a request
-private enum Status
-{
-    /// Request failed
-    Failed,
-
-    /// Request timed-out
-    Timeout,
-
-    /// Request succeeded
-    Success
-}
-
-/// Data sent by the callee back to the caller
-private struct Response
-{
-    /// Final status of a request (failed, timeout, success, etc)
-    Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
-    /// Otherwise, it contains `Exception.toString()`.
-    string data;
-}
-
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
 private struct ArgWrapper (T...)
@@ -163,290 +118,6 @@ private struct ArgWrapper (T...)
         size_t dummy;
     T args;
 }
-
-/**
- * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
- */
-class BaseFiberScheduler : C.Scheduler
-{
-    static class InfoFiber : Fiber
-    {
-        C.ThreadInfo info;
-
-        this(void delegate() op) nothrow
-        {
-            super(op, 16 * 1024 * 1024);  // 16Mb
-        }
-    }
-
-
-    /**
-     * This creates a new Fiber for the supplied op and then starts the
-     * dispatcher.
-     */
-    void start(void delegate() op)
-    {
-        create(op);
-        dispatch();
-    }
-
-    /**
-     * This created a new Fiber for the supplied op and adds it to the
-     * dispatch list.
-     */
-    void spawn(void delegate() op) nothrow
-    {
-        create(op);
-        yield();
-    }
-
-    /**
-     * If the caller is a scheduled Fiber, this yields execution to another
-     * scheduled Fiber.
-     */
-    void yield() nothrow
-    {
-        // NOTE: It's possible that we should test whether the calling Fiber
-        //       is an InfoFiber before yielding, but I think it's reasonable
-        //       that any (non-Generator) fiber should yield here.
-        if (Fiber.getThis())
-            Fiber.yield();
-    }
-
-    /**
-     * Returns an appropriate ThreadInfo instance.
-     *
-     * Returns a ThreadInfo instance specific to the calling Fiber if the
-     * Fiber was created by this dispatcher, otherwise it returns
-     * ThreadInfo.thisInfo.
-     */
-    @property ref C.ThreadInfo thisInfo() nothrow
-    {
-        auto f = cast(InfoFiber) Fiber.getThis();
-
-        if (f !is null)
-            return f.info;
-        return C.ThreadInfo.thisInfo;
-    }
-
-    /**
-     * Returns a Condition analog that yields when wait or notify is called.
-     */
-    C.Condition newCondition(C.Mutex m) nothrow
-    {
-        return new FiberCondition(m);
-    }
-
-private:
-
-    class FiberCondition : C.Condition
-    {
-        this(C.Mutex m) nothrow
-        {
-            super(m);
-            notified = false;
-        }
-
-        override void wait() nothrow
-        {
-            scope (exit) notified = false;
-
-            while (!notified)
-                switchContext();
-        }
-
-        override bool wait(Duration period) nothrow
-        {
-            import core.time : MonoTime;
-
-            scope (exit) notified = false;
-
-            for (auto limit = MonoTime.currTime + period;
-                 !notified && !period.isNegative;
-                 period = limit - MonoTime.currTime)
-            {
-                yield();
-            }
-            return notified;
-        }
-
-        override void notify() nothrow
-        {
-            notified = true;
-            switchContext();
-        }
-
-        override void notifyAll() nothrow
-        {
-            notified = true;
-            switchContext();
-        }
-
-    private:
-        void switchContext() nothrow
-        {
-            mutex_nothrow.unlock_nothrow();
-            scope (exit) mutex_nothrow.lock_nothrow();
-            yield();
-        }
-
-        private bool notified;
-    }
-
-private:
-    void dispatch()
-    {
-        import std.algorithm.mutation : remove;
-
-        while (m_fibers.length > 0)
-        {
-            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(C.OwnerTerminated) t))
-            {
-                throw t;
-            }
-            if (m_fibers[m_pos].state == Fiber.State.TERM)
-            {
-                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                    m_pos = 0;
-            }
-            else if (m_pos++ >= m_fibers.length - 1)
-            {
-                m_pos = 0;
-            }
-        }
-    }
-
-    void create(void delegate() op) nothrow
-    {
-        void wrap()
-        {
-            scope (exit)
-            {
-                thisInfo.cleanup();
-            }
-            op();
-        }
-
-        m_fibers ~= new InfoFiber(&wrap);
-    }
-
-private:
-    Fiber[] m_fibers;
-    size_t m_pos;
-}
-
-/// Our own little scheduler
-private final class LocalScheduler : BaseFiberScheduler
-{
-    import core.sync.condition;
-    import core.sync.mutex;
-
-    /// Just a FiberCondition with a state
-    private struct Waiting { FiberCondition c; bool busy; }
-
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
-
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
-    /// Should never be called from outside
-    public override Condition newCondition(Mutex m = null) nothrow
-    {
-        assert(0);
-    }
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new FiberCondition, false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
-    }
-
-    /// Override `FiberScheduler.FiberCondition` to avoid mutexes
-    /// and usage of global state
-    private class FiberCondition : Condition
-    {
-        this() nothrow
-        {
-            super(null);
-            notified = false;
-        }
-
-        override void wait() nothrow
-        {
-            scope (exit) notified = false;
-            while (!notified)
-                this.outer.yield();
-        }
-
-        override bool wait(Duration period) nothrow
-        {
-            scope (exit) notified = false;
-
-            for (auto limit = MonoTime.currTime + period;
-                 !notified && !period.isNegative;
-                 period = limit - MonoTime.currTime)
-            {
-                this.outer.yield();
-            }
-            return notified;
-        }
-
-        override void notify() nothrow
-        {
-            notified = true;
-            this.outer.yield();
-        }
-
-        override void notifyAll() nothrow
-        {
-            notified = true;
-            this.outer.yield();
-        }
-
-        private bool notified;
-    }
-}
-
-
-/// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
-private LocalScheduler scheduler;
-
-/// Whether this is the main thread
-private bool is_main_thread;
-
 
 /*******************************************************************************
 
@@ -468,18 +139,17 @@ private bool is_main_thread;
 
 public void runTask (scope void delegate() dg)
 {
-    assert(scheduler !is null, "Cannot call this function from the main thread");
-    scheduler.spawn(dg);
+    assert(C.thisScheduler !is null, "Cannot call this function from the main thread");
+    C.thisScheduler.spawn(dg);
 }
 
 /// Ditto
 public void sleep (Duration timeout)
 {
-    assert(scheduler !is null, "Cannot call this function from the main thread");
-    scope cond = scheduler.new FiberCondition();
+    assert(C.thisScheduler !is null, "Cannot call this function from the main thread");
+    scope cond = C.thisScheduler.newCondition(null);
     cond.wait(timeout);
 }
-
 
 /*******************************************************************************
 
@@ -527,7 +197,10 @@ public final class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        auto childTid = C.spawn(&spawned!(Impl), args);
+        if (C.main_thread_scheduler is null)
+            C.main_thread_scheduler = new C.LocalMainScheduler();
+
+        auto childTid = C.spawnThreadScheduler(new C.LocalNodeScheduler(), &spawned!(Impl), args);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -554,7 +227,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void handleCommand (Command cmd, API node, FilterAPI filter)
+    private static void handleCommand (C.Command cmd, API node, FilterAPI filter)
     {
         import std.format;
 
@@ -572,7 +245,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            C.send(cmd.sender, Response(Status.Failed, cmd.id,
+                            cmd.sender.send(C.Response(C.Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func)));
                             return;
                         }
@@ -581,22 +254,22 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            C.send(cmd.sender,
-                                Response(
-                                    Status.Success,
+                            cmd.sender.send(
+                                C.Response(
+                                    C.Status.Success,
                                     cmd.id,
                                     node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(Status.Success, cmd.id));
+                            cmd.sender.send(C.Response(C.Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        cmd.sender.send(C.Response(C.Status.Failed, cmd.id, t.toString()));
                     }
 
                     return;
@@ -630,20 +303,19 @@ public final class RemoteAPI (API) : API
         import std.range;
 
         scope node = new Implementation(cargs);
-        scheduler = new LocalScheduler;
         scope exc = new Exception("You should never see this exception - please report a bug");
 
         // very simple & limited variant, to keep it performant.
         // should be replaced by a real Variant later
         static struct Variant
         {
-            this (Response res) { this.res = res; this.tag = 0; }
-            this (Command cmd) { this.cmd = cmd; this.tag = 1; }
+            this (C.Response res) { this.res = res; this.tag = 0; }
+            this (C.Command cmd) { this.cmd = cmd; this.tag = 1; }
 
             union
             {
-                Response res;
-                Command cmd;
+                C.Response res;
+                C.Command cmd;
             }
 
             ubyte tag;
@@ -665,73 +337,70 @@ public final class RemoteAPI (API) : API
                 && Clock.currTime < control.sleep_until;
         }
 
+        C.LocalNodeScheduler node_scheduler = cast(C.LocalNodeScheduler)C.thisScheduler;
+
         void handle (T)(T arg)
         {
-            static if (is(T == Command))
+            static if (is(T == C.Command))
             {
-                scheduler.spawn(() => handleCommand(arg, node, control.filter));
+                node_scheduler.spawn({
+                    handleCommand(arg, node, control.filter);
+                });
             }
-            else static if (is(T == Response))
+            else static if (is(T == C.Response))
             {
-                scheduler.pending = arg;
-                scheduler.waiting[arg.id].c.notify();
-                scheduler.remove(arg.id);
+                node_scheduler.wait_manager.pending = arg;
+                node_scheduler.wait_manager.waiting[arg.id].c.notify();
+                node_scheduler.wait_manager.remove(arg.id);
             }
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
-        // we need to keep track of messages which were ignored when
-        // node.sleep() was used, and then handle each message in sequence.
-        Variant[] await_msgs;
-
-        try scheduler.start(() {
-                bool terminated = false;
-                while (!terminated)
-                {
-                    C.receiveTimeout(10.msecs,
-                        (C.OwnerTerminated e) { terminated = true; },
-                        (ShutdownCommand e) {
-                            terminated = true;
-                        },
-                        (TimeCommand s)      {
-                            control.sleep_until = Clock.currTime + s.dur;
-                            control.drop = s.drop;
-                        },
-                        (FilterAPI filter_api) {
-                            control.filter = filter_api;
-                        },
-                        (Response res) {
-                            if (!isSleeping())
-                                handle(res);
-                            else if (!control.drop)
-                                await_msgs ~= Variant(res);
-                        },
-                        (Command cmd)
-                        {
-                            if (!isSleeping())
-                                handle(cmd);
-                            else if (!control.drop)
-                                await_msgs ~= Variant(cmd);
-                        });
-
-                    // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
+        C.thisScheduler.start({
+            bool terminated = false;
+            while (!terminated)
+            {
+                C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                    (C.OwnerTerminated e) { terminated = true; },
+                    (ShutdownCommand e) {
+                        terminated = true;
+                    },
+                    (TimeCommand s)      {
+                        control.sleep_until = Clock.currTime + s.dur;
+                        control.drop = s.drop;
+                    },
+                    (FilterAPI filter_api) {
+                        control.filter = filter_api;
+                    },
+                    (C.Response res)
                     {
-                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
-                        await_msgs.length = 0;
-                        assumeSafeAppend(await_msgs);
-                    }
-                }
-                // Make sure the scheduler is not waiting for polling tasks
-                throw exc;
-            });
-        catch (Exception e)
-            if (e !is exc)
-                throw e;
+                        if (!isSleeping())
+                            handle(res);
+                        else if (!control.drop)
+                            node_scheduler.spawn({
+                                while (isSleeping())
+                                    node_scheduler.yield();
+                                handle(res);
+                            });
+                    },
+                    (C.Command cmd)
+                    {
+                        if (!isSleeping())
+                            handle(cmd);
+                        else if (!control.drop)
+                            node_scheduler.spawn({
+                                while (isSleeping())
+                                    node_scheduler.yield();
+                                handle(cmd);
+                            });
+                    });
+            }
+            C.thisInfo.cleanup(true);
+        });
     }
 
     /// Where to send message to
-    private C.Tid childTid;
+    private C.MessageDispatcher childTid;
 
     /// Whether or not the destructor should destroy the thread
     private bool owner;
@@ -756,17 +425,18 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (C.MessageDispatcher tid, Duration timeout = Duration.init) @nogc pure nothrow
     {
         this(tid, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (C.MessageDispatcher tid, bool isOwner, Duration timeout) @nogc pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -795,7 +465,7 @@ public final class RemoteAPI (API) : API
 
         ***********************************************************************/
 
-        public C.Tid tid () @nogc pure nothrow
+        public C.MessageDispatcher tid () @nogc pure nothrow
         {
             return this.childTid;
         }
@@ -808,7 +478,8 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
+            this.childTid.send(ShutdownCommand());
+            this.childTid.shutdown = true;
         }
 
         /***********************************************************************
@@ -829,7 +500,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            C.send(this.childTid, TimeCommand(d, dropMessages));
+            this.childTid.send(TimeCommand(d, dropMessages));
         }
 
         /***********************************************************************
@@ -910,7 +581,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            C.send(this.childTid, FilterAPI(mangled, pretty));
+            this.childTid.send(FilterAPI(mangled, pretty));
         }
 
 
@@ -922,7 +593,7 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            C.send(this.childTid, FilterAPI(""));
+            this.childTid.send(FilterAPI(""));
         }
     }
 
@@ -938,57 +609,90 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
-                    // we are in the main thread
-                    if (scheduler is null)
+                    if (this.childTid.shutdown)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
+
+                    C.Response res;
+                    if (cast(C.LocalMainScheduler)C.thisScheduler)
                     {
-                        scheduler = new LocalScheduler;
-                        is_main_thread = true;
-                    }
+                        C.LocalMainScheduler main_scheduler = cast(C.LocalMainScheduler)C.thisScheduler;
+                        res = () @trusted {
+                            auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                .serializeToJsonString();
 
-                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
-                    // this overload needs to be
-                    auto res = () @trusted {
-                        auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                            .serializeToJsonString();
+                            C.Command command = C.Command(C.thisMessageDispatcher(), main_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childTid.send(command);
 
-                        auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                        C.send(this.childTid, command);
-
-                        // for the main thread, we run the "event loop" until
-                        // the request we're interested in receives a response.
-                        if (is_main_thread)
-                        {
                             bool terminated = false;
-                            runTask(() {
+                            main_scheduler.spawn(() {
                                 while (!terminated)
                                 {
-                                    C.receiveTimeout(10.msecs,
-                                        (Response res) {
-                                            scheduler.pending = res;
-                                            scheduler.waiting[res.id].c.notify();
+                                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                                        (C.Response res) {
+                                            main_scheduler.wait_manager.pending = res;
+                                            main_scheduler.wait_manager.waiting[res.id].c.notify();
                                         });
-
-                                    scheduler.yield();
                                 }
                             });
 
-                            Response res;
-                            scheduler.start(() {
-                                res = scheduler.waitResponse(command.id, this.timeout);
+                            C.Response res;
+                            main_scheduler.spawn(() {
+                                res = main_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
                             });
+                            while (!terminated) Thread.sleep(1.msecs);
                             return res;
-                        }
-                        else
-                        {
-                            return scheduler.waitResponse(command.id, this.timeout);
-                        }
-                    }();
+                        }();
+                    }
+                    else if (cast(C.LocalNodeScheduler)C.thisScheduler)
+                    {
+                        C.LocalNodeScheduler node_scheduler = cast(C.LocalNodeScheduler)C.thisScheduler;
+                        res = () @trusted {
+                            auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                .serializeToJsonString();
+                            C.Command command = C.Command(C.thisMessageDispatcher(), node_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childTid.send(command);
+                            return node_scheduler.wait_manager.waitResponse(command.id, this.timeout);
+                        }();
+                    }
+                    else if (cast(C.LocalRemoteScheduler)C.thisScheduler)
+                    {
+                        C.LocalRemoteScheduler remote_scheduler = cast(C.LocalRemoteScheduler)C.thisScheduler;
+                        res = () @trusted {
+                            auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                .serializeToJsonString();
 
-                    if (res.status == Status.Failed)
+                            C.Command command = C.Command(C.thisMessageDispatcher(), remote_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
+
+                            bool terminated = false;
+                            remote_scheduler.spawn(() {
+                                this.childTid.send(command);
+                                while (!terminated)
+                                {
+                                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                                        (C.Response res) {
+                                            remote_scheduler.wait_manager.pending = res;
+                                            remote_scheduler.wait_manager.waiting[res.id].c.notify();
+                                        });
+                                }
+                            });
+
+                            C.Response res;
+                            remote_scheduler.start(() {
+                                res = remote_scheduler.wait_manager.waitResponse(command.id, this.timeout);
+                                terminated = true;
+                                C.thisInfo.cleanup(true);
+                            });
+                            return res;
+                        }();
+                    }
+                    else
+                        assert(0, "Not expected Scheduler instance.");
+
+                    if (res.status == C.Status.Failed)
                         throw new Exception(res.data);
 
-                    if (res.status == Status.Timeout)
+                    if (res.status == C.Status.Timeout)
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
                     static if (!is(ReturnType!(ovrld) == void))
@@ -1025,6 +729,7 @@ unittest
 
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
+
     test.ctrl.shutdown();
 }
 
@@ -1032,7 +737,7 @@ unittest
 unittest
 {
     import std.conv;
-    static import geod24.concurrency;
+    import geod24.MessageDispatcher;
     import geod24.Registry;
 
     __gshared Registry registry;
@@ -1072,7 +777,7 @@ unittest
     {
         const name = hash.to!string;
         auto tid = registry.locate(name);
-        if (tid != tid.init)
+        if (tid !is null)
             return new RemoteAPI!API(tid);
 
         switch (type)
@@ -1093,7 +798,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(geod24.concurrency.Tid parent)
+    static void testFunc(MessageDispatcher parent)
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
@@ -1109,18 +814,21 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
+        thisScheduler.start({
+            parent.send(42);
+            thisInfo.cleanup(true);
+        });
     }
 
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
+    spawnThreadScheduler(new LocalRemoteScheduler(), &testFunc, thisMessageDispatcher);
     // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int();
+    thisMessageDispatcher.receiveOnly!int;
 }
 
 /// This network have different types of nodes in it
 unittest
 {
-    import geod24.concurrency;
+    import geod24.MessageDispatcher;
 
     static interface API
     {
@@ -1149,7 +857,7 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(Tid masterTid)
+        this(MessageDispatcher masterTid)
         {
             this.master = new RemoteAPI!API(masterTid);
         }
@@ -1198,10 +906,10 @@ unittest
 /// Support for circular nodes call
 unittest
 {
-    static import geod24.concurrency;
+    static import geod24.MessageDispatcher;
     import std.format;
 
-    __gshared C.Tid[string] tbn;
+    __gshared C.MessageDispatcher[string] tbn;
 
     static interface API
     {
@@ -1289,20 +997,19 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
-    assert(node.getCounter() == 1);
-    assert(node.getCounter() == 0);
-    core.thread.Thread.sleep(1.seconds);
+    Thread.sleep(100.msecs);
+    assert(node.getCounter() >= 1);
+    Thread.sleep(1.seconds);
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
-    assert(node.getCounter() == 0);
     node.ctrl.shutdown();
 }
 
 // Sane name insurance policy
 unittest
 {
-    import geod24.concurrency : Tid;
+    static import geod24.MessageDispatcher;
 
     static interface API
     {
@@ -1316,7 +1023,7 @@ unittest
 
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.tid == 42);
-    assert(node.ctrl.tid != Tid.init);
+    assert(node.ctrl.tid !is null);
 
     static interface DoesntWork
     {
@@ -1329,7 +1036,7 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    __gshared C.Tid n1tid;
+    __gshared C.MessageDispatcher n1tid;
 
     static interface API
     {
@@ -1340,7 +1047,7 @@ unittest
     {
         public this()
         {
-            if (n1tid != C.Tid.init)
+            if (n1tid !is null)
                 this.remote = new RemoteAPI!API(n1tid);
         }
 
@@ -1376,12 +1083,12 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    n1.sleep(2.seconds, true);
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
-    assert(3 == n1.call());
+    Thread.sleep(2.seconds);
+    assert(3 <= n1.call());
 
     // Debug output, uncomment if needed
     version (none)
@@ -1399,7 +1106,7 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared C.Tid node_tid;
+    __gshared C.MessageDispatcher node_tid;
 
     static interface API
     {
@@ -1611,7 +1318,6 @@ unittest
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    import std.stdio;
     assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
@@ -1621,10 +1327,10 @@ unittest
 // request timeouts (foreign node to another node)
 unittest
 {
-    static import geod24.concurrency;
+    static import geod24.MessageDispatcher;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared C.MessageDispatcher node_tid;
 
     static interface API
     {
@@ -1661,10 +1367,10 @@ unittest
 // test-case for zombie responses
 unittest
 {
-    static import geod24.concurrency;
+    static import geod24.MessageDispatcher;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared C.MessageDispatcher node_tid;
 
     static interface API
     {
@@ -1703,10 +1409,10 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
-    static import geod24.concurrency;
+    static import geod24.MessageDispatcher;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared C.MessageDispatcher node_tid;
 
     static interface API
     {
@@ -1724,7 +1430,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(30.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -1740,10 +1446,10 @@ unittest
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    static import geod24.concurrency;
+    static import geod24.MessageDispatcher;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared C.MessageDispatcher node_tid;
 
     static interface API
     {
@@ -1761,10 +1467,8 @@ unittest
             assert(node.ping() == 42);
             // We need to return immediately so that the main thread
             // puts us to sleep
-            runTask(() {
-                    node.ctrl.sleep(200.msecs);
-                    assert(node.ping() == 42);
-                });
+            node.ctrl.sleep(200.msecs);
+            assert(node.ping() == 42);
         }
     }
 
