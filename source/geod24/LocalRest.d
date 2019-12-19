@@ -840,6 +840,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
+
 import std.stdio;
 /// Simple usage example
 unittest
@@ -871,7 +872,7 @@ unittest
 
     test.ctrl.shutdown();
 }
-
+/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -1654,3 +1655,5 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
+
+*/

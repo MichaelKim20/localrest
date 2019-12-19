@@ -40,41 +40,7 @@ import core.time : MonoTime;
 import core.thread;
 import std.typecons : Tuple;
 
-///
-@system unittest
-{
-    __gshared string received;
-    static void spawnedFunc (MessageDispatcher owner)
-    {
-        thisScheduler.start({
-            import std.conv : text;
-            // Receive a message from the owner thread.
-            thisMessageDispatcher.receive(
-                (int i)
-                {
-                    received = text("Received the number ", i);
-
-                    // Send a message back to the owner thread
-                    // indicating success.
-                    owner.send(true);
-                }
-            );
-
-            thisInfo.cleanup(true);
-        });
-    }
-
-    // Start spawnedFunc in a new thread.
-    auto childMessageDispatcher = spawnThread(&spawnedFunc, thisMessageDispatcher);
-
-    // Send the number 42 to this new thread.
-    childMessageDispatcher.send(42);
-
-    // Receive the result code.
-    auto wasSuccessful = thisMessageDispatcher.receiveOnly!(bool);
-    assert(wasSuccessful);
-    assert(received == "Received the number 42");
-}
+import std.stdio;
 
 private bool hasLocalAliasing (Types...)()
 {
@@ -94,20 +60,6 @@ private bool hasLocalAliasing (Types...)()
             doesIt |= std.traits.hasUnsharedAliasing!(T);
     }
     return doesIt;
-}
-
-@safe unittest
-{
-    static struct Container { MessageDispatcher t; }
-    static assert(!hasLocalAliasing!(MessageDispatcher, Container, int));
-}
-
-@safe unittest
-{
-    /* Issue 20097 */
-    import std.datetime.systime : SysTime;
-    static struct Container { SysTime time; }
-    static assert(!hasLocalAliasing!(SysTime, Container));
 }
 
 private enum MsgType
@@ -1160,178 +1112,6 @@ public class MessageDispatcher
     }
 }
 
-///
-@system unittest
-{
-    import std.variant : Variant;
-
-    auto process = ()
-    {
-        thisScheduler.start({
-            thisMessageDispatcher.receive(
-                (int i)
-                {
-                    ownerMessageDispatcher.send(1);
-                },
-                (double f)
-                {
-                    ownerMessageDispatcher.send(2);
-                },
-                (Variant v)
-                {
-                    ownerMessageDispatcher.send(3);
-                }
-            );
-            thisInfo.cleanup(true);
-        });
-    };
-
-    {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(42);
-        thisMessageDispatcher.receive((int res) {
-            assert(res == 1);
-        });
-    }
-
-    {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(3.14);
-        thisMessageDispatcher.receive((int res) {
-            assert(res == 2);
-        });
-    }
-
-    {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send("something else");
-        thisMessageDispatcher.receive((int res) {
-            assert(res == 3);
-        });
-    }
-}
-
-@safe unittest
-{
-    static assert( __traits( compiles,
-                      {
-                          thisMessageDispatcher.receive( (Variant x) {} );
-                          thisMessageDispatcher.receive( (int x) {}, (Variant x) {} );
-                      } ) );
-
-    static assert( !__traits( compiles,
-                       {
-                           thisMessageDispatcher.receive( (Variant x) {}, (int x) {} );
-                       } ) );
-
-    static assert( !__traits( compiles,
-                       {
-                           thisMessageDispatcher.receive( (int x) {}, (int x) {} );
-                       } ) );
-}
-
-// Make sure receive() works with free functions as well.
-version (unittest)
-{
-    private void receiveFunction(int x) {}
-}
-@safe unittest
-{
-    static assert( __traits( compiles,
-                      {
-                          thisMessageDispatcher.receive( &receiveFunction );
-                          thisMessageDispatcher.receive( &receiveFunction, (Variant x) {} );
-                      } ) );
-}
-
-///
-@system unittest
-{
-    auto spawnedMessageDispatcher = spawnThread(
-    {
-        thisScheduler.start({
-            assert(thisMessageDispatcher.receiveOnly!int == 42);
-            thisInfo.cleanup(true);
-        });
-    });
-    spawnedMessageDispatcher.send(42);
-}
-
-///
-@system unittest
-{
-    auto spawnedMessageDispatcher = spawnThread(
-    {
-        thisScheduler.start({
-            assert(thisMessageDispatcher.receiveOnly!string == "text");
-            thisInfo.cleanup(true);
-        });
-    });
-    spawnedMessageDispatcher.send("text");
-}
-
-///
-@system unittest
-{
-    struct Record { string name; int age; }
-
-    auto spawnedMessageDispatcher = spawnThread(
-    {
-        thisScheduler.start({
-            auto msg = thisMessageDispatcher.receiveOnly!(double, Record);
-            assert(msg[0] == 0.5);
-            assert(msg[1].name == "Alice");
-            assert(msg[1].age == 31);
-            thisInfo.cleanup(true);
-        });
-    });
-
-    spawnedMessageDispatcher.send(0.5, Record("Alice", 31));
-}
-
-@system unittest
-{
-    static void t1 (MessageDispatcher mainMsgDispatcher)
-    {
-        thisScheduler.start({
-            try
-            {
-                thisMessageDispatcher.receiveOnly!string();
-                mainMsgDispatcher.send("");
-            }
-            catch (Throwable th)
-            {
-                mainMsgDispatcher.send(th.msg);
-            }
-            thisInfo.cleanup(true);
-        });
-    }
-
-    auto spawnedMessageDispatcher = spawnThread(&t1, thisMessageDispatcher);
-    spawnedMessageDispatcher.send(1);
-    string result = thisMessageDispatcher.receiveOnly!string();
-    assert(result == "Unexpected message type: expected 'string', got 'int'");
-}
-
-@safe unittest
-{
-    static assert(__traits(compiles, {
-        thisMessageDispatcher.receiveTimeout(msecs(0), (Variant x) {});
-        thisMessageDispatcher.receiveTimeout(msecs(0), (int x) {}, (Variant x) {});
-    }));
-
-    static assert(!__traits(compiles, {
-        thisMessageDispatcher.receiveTimeout(msecs(0), (Variant x) {}, (int x) {});
-    }));
-
-    static assert(!__traits(compiles, {
-        thisMessageDispatcher.receiveTimeout(msecs(0), (int x) {}, (int x) {});
-    }));
-
-    static assert(__traits(compiles, {
-        thisMessageDispatcher.receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
-    }));
-}
 
 /*******************************************************************************
 
@@ -1390,17 +1170,23 @@ public struct ThreadInfo
 
     public void cleanup (bool forced = false)
     {
+        import std.stdio;
+
+        //writefln("cleanup %s %s 1", ident, scheduler);
         if (this.ident is null)
             return;
 
+        writefln("cleanup %s %s 2", ident, scheduler);
         if (!this.is_inherited)
         {
+            writefln("cleanup %s %s 3", ident, scheduler);
             foreach (dispatcher; links.keys)
                 dispatcher._send(MsgType.linkDead, this.ident);
 
-            if (this.owner !is null)
-                this.owner._send(MsgType.linkDead, this.ident);
+            //if (this.owner !is null)
+            //   this.owner._send(MsgType.linkDead, this.ident);
 
+            writefln("cleanup %s %s 4", ident, scheduler);
             if ((this.scheduler !is null) && this.have_scheduler)
                 this.scheduler.stop({
                     if (this.ident !is null)
@@ -1409,6 +1195,7 @@ public struct ThreadInfo
             else
                 if (this.ident !is null)
                     this.ident.cleanup();
+            writefln("cleanup %s %s 5", ident, scheduler);
         }
     }
 }
@@ -1630,7 +1417,6 @@ public class ThreadScheduler : Scheduler
     {
         return new Condition(m);
     }
-
 }
 
 
@@ -2172,8 +1958,11 @@ public @property MessageDispatcher thisMessageDispatcher () @safe
         if (thisInfo.ident !is null)
             return thisInfo.ident;
         thisInfo.ident = new MessageDispatcher();
+
         main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new MainScheduler();
+
         thisInfo.scheduler = main_thread_scheduler;
+
         thisInfo.have_scheduler = true;
         return thisInfo.ident;
     }
@@ -2360,6 +2149,288 @@ if (isSpawnable!(F, T))
     return spawn_dispatcher;
 }
 
+public MessageDispatcher spawnFiber (void delegate () op)
+{
+    auto spawn_dispatcher = new MessageDispatcher();
+    auto owner_dispatcher = thisMessageDispatcher;
+    auto owner_scheduler = thisScheduler;
+
+    thisScheduler.spawn(
+    {
+        thisInfo.ident = spawn_dispatcher;
+        thisInfo.owner = owner_dispatcher;
+        thisInfo.scheduler = owner_scheduler;
+        thisInfo.have_scheduler = false;
+        thisInfo.is_inherited = false;
+        op();
+    });
+
+    return spawn_dispatcher;
+}
+
+public void spawnInheritedFiber (void delegate () op)
+{
+    auto spawn_dispatcher = thisMessageDispatcher;
+    auto owner_dispatcher = ownerMessageDispatcher;
+    auto owner_scheduler = thisScheduler;
+
+    thisScheduler.spawn(
+    {
+        thisInfo.ident = spawn_dispatcher;
+        thisInfo.owner = owner_dispatcher;
+        thisInfo.scheduler = owner_scheduler;
+        thisInfo.have_scheduler = false;
+        thisInfo.is_inherited = true;
+        op();
+    });
+}
+
+
+void yield ()
+{
+    thisScheduler.yield();
+}
+
+void yieldAndSleep ()
+{
+    thisScheduler.yield();
+    Thread.sleep(1.msecs);
+}
+
+void sleepThread (Duration val)
+{
+    Thread.sleep(val);
+}
+
+void sleep (Duration timeout)
+{
+    scope condition = thisScheduler.newCondition(null);
+    condition.wait(timeout);
+}
+
+/*
+///
+@system unittest
+{
+    __gshared string received;
+    static void spawnedFunc (MessageDispatcher owner)
+    {
+        thisScheduler.start({
+            import std.conv : text;
+            // Receive a message from the owner thread.
+            thisMessageDispatcher.receive(
+                (int i)
+                {
+                    received = text("Received the number ", i);
+
+                    // Send a message back to the owner thread
+                    // indicating success.
+                    owner.send(true);
+                }
+            );
+
+            thisInfo.cleanup(true);
+        });
+    }
+
+    // Start spawnedFunc in a new thread.
+    auto childMessageDispatcher = spawnThread(&spawnedFunc, thisMessageDispatcher);
+
+    // Send the number 42 to this new thread.
+    childMessageDispatcher.send(42);
+
+    // Receive the result code.
+    auto wasSuccessful = thisMessageDispatcher.receiveOnly!(bool);
+    assert(wasSuccessful);
+    assert(received == "Received the number 42");
+}
+
+@safe unittest
+{
+    static struct Container { MessageDispatcher t; }
+    static assert(!hasLocalAliasing!(MessageDispatcher, Container, int));
+}
+
+@safe unittest
+{
+    import std.datetime.systime : SysTime;
+    static struct Container { SysTime time; }
+    static assert(!hasLocalAliasing!(SysTime, Container));
+}
+
+///
+@system unittest
+{
+    import std.variant : Variant;
+
+    auto process = ()
+    {
+        thisScheduler.start({
+            thisMessageDispatcher.receive(
+                (int i)
+                {
+                    ownerMessageDispatcher.send(1);
+                },
+                (double f)
+                {
+                    ownerMessageDispatcher.send(2);
+                },
+                (Variant v)
+                {
+                    ownerMessageDispatcher.send(3);
+                }
+            );
+            thisInfo.cleanup(true);
+        });
+    };
+
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(42);
+        thisMessageDispatcher.receive((int res) {
+            assert(res == 1);
+        });
+    }
+
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(3.14);
+        thisMessageDispatcher.receive((int res) {
+            assert(res == 2);
+        });
+    }
+
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send("something else");
+        thisMessageDispatcher.receive((int res) {
+            assert(res == 3);
+        });
+    }
+}
+
+@safe unittest
+{
+    static assert( __traits( compiles,
+                      {
+                          thisMessageDispatcher.receive( (Variant x) {} );
+                          thisMessageDispatcher.receive( (int x) {}, (Variant x) {} );
+                      } ) );
+
+    static assert( !__traits( compiles,
+                       {
+                           thisMessageDispatcher.receive( (Variant x) {}, (int x) {} );
+                       } ) );
+
+    static assert( !__traits( compiles,
+                       {
+                           thisMessageDispatcher.receive( (int x) {}, (int x) {} );
+                       } ) );
+}
+
+// Make sure receive() works with free functions as well.
+version (unittest)
+{
+    private void receiveFunction(int x) {}
+}
+@safe unittest
+{
+    static assert( __traits( compiles,
+                      {
+                          thisMessageDispatcher.receive( &receiveFunction );
+                          thisMessageDispatcher.receive( &receiveFunction, (Variant x) {} );
+                      } ) );
+}
+
+///
+@system unittest
+{
+    auto spawnedMessageDispatcher = spawnThread(
+    {
+        thisScheduler.start({
+            assert(thisMessageDispatcher.receiveOnly!int == 42);
+            thisInfo.cleanup(true);
+        });
+    });
+    spawnedMessageDispatcher.send(42);
+}
+
+///
+@system unittest
+{
+    auto spawnedMessageDispatcher = spawnThread(
+    {
+        thisScheduler.start({
+            assert(thisMessageDispatcher.receiveOnly!string == "text");
+            thisInfo.cleanup(true);
+        });
+    });
+    spawnedMessageDispatcher.send("text");
+}
+
+///
+@system unittest
+{
+    struct Record { string name; int age; }
+
+    auto spawnedMessageDispatcher = spawnThread(
+    {
+        thisScheduler.start({
+            auto msg = thisMessageDispatcher.receiveOnly!(double, Record);
+            assert(msg[0] == 0.5);
+            assert(msg[1].name == "Alice");
+            assert(msg[1].age == 31);
+            thisInfo.cleanup(true);
+        });
+    });
+
+    spawnedMessageDispatcher.send(0.5, Record("Alice", 31));
+}
+
+@system unittest
+{
+    static void t1 (MessageDispatcher mainMsgDispatcher)
+    {
+        thisScheduler.start({
+            try
+            {
+                thisMessageDispatcher.receiveOnly!string();
+                mainMsgDispatcher.send("");
+            }
+            catch (Throwable th)
+            {
+                mainMsgDispatcher.send(th.msg);
+            }
+            thisInfo.cleanup(true);
+        });
+    }
+
+    auto spawnedMessageDispatcher = spawnThread(&t1, thisMessageDispatcher);
+    spawnedMessageDispatcher.send(1);
+    string result = thisMessageDispatcher.receiveOnly!string();
+    assert(result == "Unexpected message type: expected 'string', got 'int'");
+}
+
+@safe unittest
+{
+    static assert(__traits(compiles, {
+        thisMessageDispatcher.receiveTimeout(msecs(0), (Variant x) {});
+        thisMessageDispatcher.receiveTimeout(msecs(0), (int x) {}, (Variant x) {});
+    }));
+
+    static assert(!__traits(compiles, {
+        thisMessageDispatcher.receiveTimeout(msecs(0), (Variant x) {}, (int x) {});
+    }));
+
+    static assert(!__traits(compiles, {
+        thisMessageDispatcher.receiveTimeout(msecs(0), (int x) {}, (int x) {});
+    }));
+
+    static assert(__traits(compiles, {
+        thisMessageDispatcher.receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
+    }));
+}
+
 ///
 @system unittest
 {
@@ -2448,70 +2519,13 @@ if (isSpawnable!(F, T))
     static assert( __traits(compiles, spawnThread(callable10, 10)));
     static assert( __traits(compiles, spawnThread(callable11, 11)));
 }
-
-public MessageDispatcher spawnFiber (void delegate () op)
-{
-    auto spawn_dispatcher = new MessageDispatcher();
-    auto owner_dispatcher = thisMessageDispatcher;
-    auto owner_scheduler = thisScheduler;
-
-    thisScheduler.spawn(
-    {
-        thisInfo.ident = spawn_dispatcher;
-        thisInfo.owner = owner_dispatcher;
-        thisInfo.scheduler = owner_scheduler;
-        thisInfo.have_scheduler = false;
-        thisInfo.is_inherited = false;
-        op();
-    });
-
-    return spawn_dispatcher;
-}
-
-public void spawnInheritedFiber (void delegate () op)
-{
-    auto spawn_dispatcher = thisMessageDispatcher;
-    auto owner_dispatcher = ownerMessageDispatcher;
-    auto owner_scheduler = thisScheduler;
-
-    thisScheduler.spawn(
-    {
-        thisInfo.ident = spawn_dispatcher;
-        thisInfo.owner = owner_dispatcher;
-        thisInfo.scheduler = owner_scheduler;
-        thisInfo.have_scheduler = false;
-        thisInfo.is_inherited = true;
-        op();
-    });
-}
-
-
-void yield ()
-{
-    thisScheduler.yield();
-}
-
-void yieldAndSleep ()
-{
-    thisScheduler.yield();
-    Thread.sleep(1.msecs);
-}
-
-void sleepThread (Duration val)
-{
-    Thread.sleep(val);
-}
-
-void sleep (Duration timeout)
-{
-    scope condition = thisScheduler.newCondition(null);
-    condition.wait(timeout);
-}
+*/
 
 unittest
 {
     import std.concurrency;
-    import std.stdio;
+
+    writefln("test 0000 %s", thisScheduler);
 
     auto process = (MessageDispatcher owner)
     {
