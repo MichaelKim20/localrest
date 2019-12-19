@@ -86,21 +86,6 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
-/// Data sent by the caller
-private struct Command
-{
-    /// Tid of the sender thread (cannot be JSON serialized)
-    C.MessageDispatcher sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
-    /// Method to call
-    string method;
-    /// Arguments to the method, JSON formatted
-    string args;
-}
-
 /// Ask the node to exhibit a certain behavior for a given time
 private struct TimeCommand
 {
@@ -125,34 +110,6 @@ private struct FilterAPI
     string pretty_func;
 }
 
-/// Status of a request
-private enum Status
-{
-    /// Request failed
-    Failed,
-
-    /// Request timed-out
-    Timeout,
-
-    /// Request succeeded
-    Success
-}
-
-/// Data sent by the callee back to the caller
-private struct Response
-{
-    /// Final status of a request (failed, timeout, success, etc)
-    Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
-    /// Otherwise, it contains `Exception.toString()`.
-    string data;
-}
-
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
 private struct ArgWrapper (T...)
@@ -160,95 +117,6 @@ private struct ArgWrapper (T...)
     static if (T.length == 0)
         size_t dummy;
     T args;
-}
-
-class WaitManager
-{
-    import core.sync.condition;
-
-    /// Just a FiberCondition with a state
-    private struct Waiting { C.FiberCondition c; bool busy; }
-
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
-
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
-    private C.FiberScheduler scheduler;
-
-    public this (C.FiberScheduler scheduler)
-    {
-        this.scheduler = scheduler;
-    }
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new C.FiberCondition(null, this.scheduler), false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
-    }
-}
-
-class LocalNodeScheduler : C.NodeScheduler
-{
-    public WaitManager wait_manager;
-
-    public this ()
-    {
-        super();
-        this.wait_manager = new WaitManager(this);
-    }
-}
-
-class LocalMainScheduler : C.MainScheduler
-{
-    public WaitManager wait_manager;
-
-    public this ()
-    {
-        super();
-        this.wait_manager = new WaitManager(this);
-    }
-}
-
-class LocalRemoteScheduler : C.FiberScheduler
-{
-    public WaitManager wait_manager;
-
-    public this ()
-    {
-        this.wait_manager = new WaitManager(this);
-    }
 }
 
 /*******************************************************************************
@@ -330,16 +198,9 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         if (C.main_thread_scheduler is null)
-            C.main_thread_scheduler = new LocalMainScheduler();
+            C.main_thread_scheduler = new C.LocalMainScheduler();
 
-        if (!cast(LocalMainScheduler)C.main_thread_scheduler)
-        {
-            C.main_thread_scheduler.stop({}, true);
-            C.main_thread_scheduler = new LocalMainScheduler();
-        }
-
-        auto scheduler = new LocalNodeScheduler();
-        auto childTid = C.spawnThreadScheduler(new LocalNodeScheduler(), &spawned!(Impl), args);
+        auto childTid = C.spawnThreadScheduler(new C.LocalNodeScheduler(), &spawned!(Impl), args);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -366,7 +227,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void handleCommand (Command cmd, API node, FilterAPI filter)
+    private static void handleCommand (C.Command cmd, API node, FilterAPI filter)
     {
         import std.format;
 
@@ -384,7 +245,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            cmd.sender.send(Response(Status.Failed, cmd.id,
+                            cmd.sender.send(C.Response(C.Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func)));
                             return;
                         }
@@ -394,21 +255,21 @@ public final class RemoteAPI (API) : API
                         static if (!is(ReturnType!ovrld == void))
                         {
                             cmd.sender.send(
-                                Response(
-                                    Status.Success,
+                                C.Response(
+                                    C.Status.Success,
                                     cmd.id,
                                     node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            cmd.sender.send(Response(Status.Success, cmd.id));
+                            cmd.sender.send(C.Response(C.Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        cmd.sender.send(Response(Status.Failed, cmd.id, t.toString()));
+                        cmd.sender.send(C.Response(C.Status.Failed, cmd.id, t.toString()));
                     }
 
                     return;
@@ -448,13 +309,13 @@ public final class RemoteAPI (API) : API
         // should be replaced by a real Variant later
         static struct Variant
         {
-            this (Response res) { this.res = res; this.tag = 0; }
-            this (Command cmd) { this.cmd = cmd; this.tag = 1; }
+            this (C.Response res) { this.res = res; this.tag = 0; }
+            this (C.Command cmd) { this.cmd = cmd; this.tag = 1; }
 
             union
             {
-                Response res;
-                Command cmd;
+                C.Response res;
+                C.Command cmd;
             }
 
             ubyte tag;
@@ -476,17 +337,17 @@ public final class RemoteAPI (API) : API
                 && Clock.currTime < control.sleep_until;
         }
 
-        LocalNodeScheduler node_scheduler = cast(LocalNodeScheduler)C.thisScheduler;
+        C.LocalNodeScheduler node_scheduler = cast(C.LocalNodeScheduler)C.thisScheduler;
 
         void handle (T)(T arg)
         {
-            static if (is(T == Command))
+            static if (is(T == C.Command))
             {
                 node_scheduler.spawn({
                     handleCommand(arg, node, control.filter);
                 });
             }
-            else static if (is(T == Response))
+            else static if (is(T == C.Response))
             {
                 node_scheduler.wait_manager.pending = arg;
                 node_scheduler.wait_manager.waiting[arg.id].c.notify();
@@ -511,7 +372,7 @@ public final class RemoteAPI (API) : API
                     (FilterAPI filter_api) {
                         control.filter = filter_api;
                     },
-                    (Response res)
+                    (C.Response res)
                     {
                         if (!isSleeping())
                             handle(res);
@@ -522,7 +383,7 @@ public final class RemoteAPI (API) : API
                                 handle(res);
                             });
                     },
-                    (Command cmd)
+                    (C.Command cmd)
                     {
                         if (!isSleeping())
                             handle(cmd);
@@ -751,15 +612,15 @@ public final class RemoteAPI (API) : API
                     if (this.childTid.shutdown)
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
-                    Response res;
-                    if (cast(LocalMainScheduler)C.thisScheduler)
+                    C.Response res;
+                    if (cast(C.LocalMainScheduler)C.thisScheduler)
                     {
-                        LocalMainScheduler main_scheduler = cast(LocalMainScheduler)C.thisScheduler;
+                        C.LocalMainScheduler main_scheduler = cast(C.LocalMainScheduler)C.thisScheduler;
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
 
-                            Command command = Command(C.thisMessageDispatcher(), main_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
+                            C.Command command = C.Command(C.thisMessageDispatcher(), main_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
                             this.childTid.send(command);
 
                             bool terminated = false;
@@ -767,14 +628,14 @@ public final class RemoteAPI (API) : API
                                 while (!terminated)
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
-                                        (Response res) {
+                                        (C.Response res) {
                                             main_scheduler.wait_manager.pending = res;
                                             main_scheduler.wait_manager.waiting[res.id].c.notify();
                                         });
                                 }
                             });
 
-                            Response res;
+                            C.Response res;
                             main_scheduler.spawn(() {
                                 res = main_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
@@ -783,25 +644,25 @@ public final class RemoteAPI (API) : API
                             return res;
                         }();
                     }
-                    else if (cast(LocalNodeScheduler)C.thisScheduler)
+                    else if (cast(C.LocalNodeScheduler)C.thisScheduler)
                     {
-                        LocalNodeScheduler node_scheduler = cast(LocalNodeScheduler)C.thisScheduler;
+                        C.LocalNodeScheduler node_scheduler = cast(C.LocalNodeScheduler)C.thisScheduler;
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
-                            Command command = Command(C.thisMessageDispatcher(), node_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
+                            C.Command command = C.Command(C.thisMessageDispatcher(), node_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
                             this.childTid.send(command);
                             return node_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                         }();
                     }
-                    else if (cast(LocalRemoteScheduler)C.thisScheduler)
+                    else if (cast(C.LocalRemoteScheduler)C.thisScheduler)
                     {
-                        LocalRemoteScheduler remote_scheduler = cast(LocalRemoteScheduler)C.thisScheduler;
+                        C.LocalRemoteScheduler remote_scheduler = cast(C.LocalRemoteScheduler)C.thisScheduler;
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
 
-                            Command command = Command(C.thisMessageDispatcher(), remote_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
+                            C.Command command = C.Command(C.thisMessageDispatcher(), remote_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             bool terminated = false;
                             remote_scheduler.spawn(() {
@@ -809,14 +670,14 @@ public final class RemoteAPI (API) : API
                                 while (!terminated)
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
-                                        (Response res) {
+                                        (C.Response res) {
                                             remote_scheduler.wait_manager.pending = res;
                                             remote_scheduler.wait_manager.waiting[res.id].c.notify();
                                         });
                                 }
                             });
 
-                            Response res;
+                            C.Response res;
                             remote_scheduler.start(() {
                                 res = remote_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
@@ -828,10 +689,10 @@ public final class RemoteAPI (API) : API
                     else
                         assert(0, "Not expected Scheduler instance.");
 
-                    if (res.status == Status.Failed)
+                    if (res.status == C.Status.Failed)
                         throw new Exception(res.data);
 
-                    if (res.status == Status.Timeout)
+                    if (res.status == C.Status.Timeout)
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
                     static if (!is(ReturnType!(ovrld) == void))
@@ -841,7 +702,6 @@ public final class RemoteAPI (API) : API
         }
 }
 
-import std.stdio;
 /// Simple usage example
 unittest
 {
@@ -872,7 +732,7 @@ unittest
 
     test.ctrl.shutdown();
 }
-/*
+
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -1458,7 +1318,6 @@ unittest
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    import std.stdio;
     assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
@@ -1655,5 +1514,3 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
-
-*/

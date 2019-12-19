@@ -40,8 +40,6 @@ import core.time : MonoTime;
 import core.thread;
 import std.typecons : Tuple;
 
-import std.stdio;
-
 private bool hasLocalAliasing (Types...)()
 {
     import std.typecons : Rebindable;
@@ -1170,23 +1168,14 @@ public struct ThreadInfo
 
     public void cleanup (bool forced = false)
     {
-        import std.stdio;
-
-        //writefln("cleanup %s %s 1", ident, scheduler);
         if (this.ident is null)
             return;
 
-        writefln("cleanup %s %s 2", ident, scheduler);
         if (!this.is_inherited)
         {
-            writefln("cleanup %s %s 3", ident, scheduler);
             foreach (dispatcher; links.keys)
                 dispatcher._send(MsgType.linkDead, this.ident);
 
-            //if (this.owner !is null)
-            //   this.owner._send(MsgType.linkDead, this.ident);
-
-            writefln("cleanup %s %s 4", ident, scheduler);
             if ((this.scheduler !is null) && this.have_scheduler)
                 this.scheduler.stop({
                     if (this.ident !is null)
@@ -1195,7 +1184,6 @@ public struct ThreadInfo
             else
                 if (this.ident !is null)
                     this.ident.cleanup();
-            writefln("cleanup %s %s 5", ident, scheduler);
         }
     }
 }
@@ -1448,7 +1436,7 @@ public class FiberCondition : Condition
     /// Owner
     private FiberScheduler owner;
 
-    public this (Mutex m, FiberScheduler s) nothrow
+    public this (FiberScheduler s, Mutex m) nothrow
     {
         super(m);
         this.owner = s;
@@ -1600,7 +1588,7 @@ public class FiberScheduler : Scheduler
 
     public Condition newCondition (Mutex m) nothrow
     {
-        return new FiberCondition(m, this);
+        return new FiberCondition(this, m);
     }
 
     /***************************************************************************
@@ -1959,7 +1947,7 @@ public @property MessageDispatcher thisMessageDispatcher () @safe
             return thisInfo.ident;
         thisInfo.ident = new MessageDispatcher();
 
-        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new MainScheduler();
+        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new LocalMainScheduler();
 
         thisInfo.scheduler = main_thread_scheduler;
 
@@ -1996,14 +1984,14 @@ public @property Scheduler thisScheduler () @safe
     {
         if (thisInfo.scheduler !is null)
         {
-            if (cast(MainScheduler)thisInfo.scheduler)
+            if (cast(LocalMainScheduler)thisInfo.scheduler)
                 thisInfo.scheduler = main_thread_scheduler;
             return thisInfo.scheduler;
         }
         if (thisInfo.ident is null)
             thisInfo.ident = new MessageDispatcher();
 
-        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new MainScheduler();
+        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new LocalMainScheduler();
         thisInfo.scheduler = main_thread_scheduler;
 
         thisInfo.have_scheduler = true;
@@ -2208,7 +2196,138 @@ void sleep (Duration timeout)
     condition.wait(timeout);
 }
 
-/*
+
+/// Data sent by the caller
+public struct Command
+{
+    /// Tid of the sender thread (cannot be JSON serialized)
+    MessageDispatcher sender;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response`
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id = size_t.max;
+    /// Method to call
+    string method;
+    /// Arguments to the method, JSON formatted
+    string args;
+}
+
+/// Status of a request
+public enum Status
+{
+    /// Request failed
+    Failed,
+
+    /// Request timed-out
+    Timeout,
+
+    /// Request succeeded
+    Success
+}
+
+/// Data sent by the callee back to the caller
+public struct Response
+{
+    /// Final status of a request (failed, timeout, success, etc)
+    Status status;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response` so the scheduler can
+    /// properly dispatch this event
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id;
+    /// If `status == Status.Success`, the JSON-serialized return value.
+    /// Otherwise, it contains `Exception.toString()`.
+    string data;
+}
+
+/// Waiting for Response
+public class WaitManager
+{
+    /// Just a FiberCondition with a state
+    public struct Waiting { FiberCondition c; bool busy; }
+
+    /// The 'Response' we are currently processing, if any
+    public Response pending;
+
+    /// Request IDs waiting for a response
+    public Waiting[ulong] waiting;
+
+    private FiberScheduler scheduler;
+
+    public this (FiberScheduler scheduler)
+    {
+        this.scheduler = scheduler;
+    }
+
+    /// Get the next available request ID
+    public size_t getNextResponseId ()
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+    public Response waitResponse (size_t id, Duration duration) nothrow
+    {
+        if (id !in this.waiting)
+            this.waiting[id] = Waiting(new FiberCondition(this.scheduler, null), false);
+
+        Waiting* ptr = &this.waiting[id];
+        if (ptr.busy)
+            assert(0, "Trying to override a pending request");
+
+        // We yield and wait for an answer
+        ptr.busy = true;
+
+        if (duration == Duration.init)
+            ptr.c.wait();
+        else if (!ptr.c.wait(duration))
+            this.pending = Response(Status.Timeout, this.pending.id);
+
+        ptr.busy = false;
+        // After control returns to us, `pending` has been filled
+        scope(exit) this.pending = Response.init;
+        return this.pending;
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id)
+    {
+        this.waiting.remove(id);
+    }
+}
+
+public class LocalNodeScheduler : NodeScheduler
+{
+    public WaitManager wait_manager;
+
+    public this ()
+    {
+        super();
+        this.wait_manager = new WaitManager(this);
+    }
+}
+
+public class LocalMainScheduler : MainScheduler
+{
+    public WaitManager wait_manager;
+
+    public this ()
+    {
+        super();
+        this.wait_manager = new WaitManager(this);
+    }
+}
+
+public class LocalRemoteScheduler : FiberScheduler
+{
+    public WaitManager wait_manager;
+
+    public this ()
+    {
+        this.wait_manager = new WaitManager(this);
+    }
+}
+
 ///
 @system unittest
 {
@@ -2519,13 +2638,10 @@ version (unittest)
     static assert( __traits(compiles, spawnThread(callable10, 10)));
     static assert( __traits(compiles, spawnThread(callable11, 11)));
 }
-*/
 
 unittest
 {
     import std.concurrency;
-
-    writefln("test 0000 %s", thisScheduler);
 
     auto process = (MessageDispatcher owner)
     {
