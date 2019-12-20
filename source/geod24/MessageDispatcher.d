@@ -40,6 +40,8 @@ import core.time : MonoTime;
 import core.thread;
 import std.typecons : Tuple;
 
+import std.stdio;
+
 private bool hasLocalAliasing (Types...)()
 {
     import std.typecons : Rebindable;
@@ -1168,14 +1170,19 @@ public struct ThreadInfo
 
     public void cleanup (bool forced = false)
     {
+        writefln("cleanup 1 %s", thisScheduler);
         if (this.ident is null)
             return;
 
+        writefln("cleanup 1-2 %s %s", thisInfo, thisScheduler);
+
         if (!this.is_inherited)
         {
+            writefln("cleanup 2 %s", thisScheduler);
             foreach (dispatcher; links.keys)
                 dispatcher._send(MsgType.linkDead, this.ident);
 
+            writefln("cleanup 3 %s", thisScheduler);
             if ((this.scheduler !is null) && this.have_scheduler)
                 this.scheduler.stop({
                     if (this.ident !is null)
@@ -1184,6 +1191,7 @@ public struct ThreadInfo
             else
                 if (this.ident !is null)
                     this.ident.cleanup();
+            writefln("cleanup 4 %s", thisScheduler);
         }
     }
 }
@@ -1421,6 +1429,15 @@ private static class InfoFiber : Fiber
     public this (void delegate () op) nothrow
     {
         super(op);
+    }
+
+    public @property ref ThreadInfo thisInfo () nothrow
+    {
+        auto f = cast(InfoFiber) Fiber.getThis();
+
+        if (f !is null)
+            return f.info;
+        return ThreadInfo.thisInfo;
     }
 }
 
@@ -1674,7 +1691,7 @@ public class NodeScheduler : FiberScheduler
 
     override public void start (void delegate () op)
     {
-        create(op);
+        createForStart(op);
         dispatch();
     }
 
@@ -1694,11 +1711,17 @@ public class NodeScheduler : FiberScheduler
 
         terminated = true;
         terminated_time = MonoTime.currTime;
-
+/*
         while (!this.stoped)
-            sleep(100.msecs);
-
+        {
+            sleepThread(10.msecs);
+            auto elapsed = MonoTime.currTime - terminated_time;
+            if (elapsed > this.stop_delay_time)
+                break;
+        }
+*/
         op();
+        writefln("Node stop");
     }
 
 
@@ -1733,6 +1756,7 @@ public class NodeScheduler : FiberScheduler
                     m_pos = 0;
                 }
             }
+            //writefln("Node m_fibers.length : %s", m_fibers.length);
             done = terminated && (m_fibers.length == 0);
             if (!done && terminated)
             {
@@ -1742,7 +1766,7 @@ public class NodeScheduler : FiberScheduler
             }
             m.unlock();
             if ((++loop % 50) == 0)
-                Thread.sleep(10.msecs);
+                sleepThread(10.msecs);
         }
         this.stoped = true;
     }
@@ -1756,12 +1780,62 @@ public class NodeScheduler : FiberScheduler
 
     override protected void create (void delegate () op) nothrow
     {
+        MessageDispatcher spawn_dispatcher;
+        MessageDispatcher owner_dispatcher;
+        Scheduler owner_scheduler;
+        try
+        {
+            spawn_dispatcher = thisMessageDispatcher;
+            owner_dispatcher = ownerMessageDispatcher;
+            owner_scheduler = thisScheduler;
+        }
+        catch (Exception)
+        {}
+
         void wrap ()
         {
             scope (exit)
             {
                 thisInfo.cleanup();
             }
+            thisInfo.ident = spawn_dispatcher;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = owner_scheduler;
+            thisInfo.have_scheduler = false;
+            thisInfo.is_inherited = true;
+            op();
+        }
+
+        m.lock_nothrow();
+        m_fibers ~= new InfoFiber(&wrap);
+        m.unlock_nothrow();
+    }
+
+    protected void createForStart (void delegate () op) nothrow
+    {
+        MessageDispatcher spawn_dispatcher;
+        MessageDispatcher owner_dispatcher;
+        Scheduler owner_scheduler;
+        try
+        {
+            spawn_dispatcher = thisMessageDispatcher;
+            owner_dispatcher = ownerMessageDispatcher;
+            owner_scheduler = thisScheduler;
+        }
+        catch (Exception)
+        {}
+
+        void wrap ()
+        {
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
+            thisInfo.ident = spawn_dispatcher;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = owner_scheduler;
+            thisInfo.have_scheduler = false;
+            thisInfo.is_inherited = false;
             op();
         }
 
@@ -1822,7 +1896,7 @@ public class MainScheduler : FiberScheduler
 
     override public void start (void delegate () op)
     {
-        create(op);
+        createForStart(op);
         yield();
     }
 
@@ -1843,8 +1917,14 @@ public class MainScheduler : FiberScheduler
         terminated = true;
         terminated_time = MonoTime.currTime;
         while (!this.stoped)
-            sleep(100.msecs);
+        {
+            sleepThread(10.msecs);
+            auto elapsed = MonoTime.currTime - terminated_time;
+            if (elapsed > this.stop_delay_time)
+                break;
+        }
         op();
+        writefln("Main stop");
     }
 
 
@@ -1880,6 +1960,7 @@ public class MainScheduler : FiberScheduler
                     m_pos = 0;
                 }
             }
+            //writefln("Main m_fibers.length : %s", m_fibers.length);
             done = terminated && (m_fibers.length == 0);
             if (!done && terminated)
             {
@@ -1889,11 +1970,11 @@ public class MainScheduler : FiberScheduler
             }
             m.unlock();
             if ((++loop % 50) == 0)
-                Thread.sleep(10.msecs);
+                sleepThread(10.msecs);
         }
         this.stoped = true;
+        writefln("Main stoped");
     }
-
 
     /***************************************************************************
 
@@ -1903,12 +1984,62 @@ public class MainScheduler : FiberScheduler
 
     override protected void create (void delegate () op) nothrow
     {
+        MessageDispatcher spawn_dispatcher;
+        MessageDispatcher owner_dispatcher;
+        Scheduler owner_scheduler;
+        try
+        {
+            spawn_dispatcher = thisMessageDispatcher;
+            owner_dispatcher = ownerMessageDispatcher;
+            owner_scheduler = thisScheduler;
+        }
+        catch (Exception)
+        {}
+
         void wrap ()
         {
             scope (exit)
             {
                 thisInfo.cleanup();
             }
+            thisInfo.ident = spawn_dispatcher;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = owner_scheduler;
+            thisInfo.have_scheduler = false;
+            thisInfo.is_inherited = true;
+            op();
+        }
+
+        m.lock_nothrow();
+        m_fibers ~= new InfoFiber(&wrap);
+        m.unlock_nothrow();
+    }
+
+    protected void createForStart (void delegate () op) nothrow
+    {
+        MessageDispatcher spawn_dispatcher;
+        MessageDispatcher owner_dispatcher;
+        Scheduler owner_scheduler;
+        try
+        {
+            spawn_dispatcher = thisMessageDispatcher;
+            owner_dispatcher = ownerMessageDispatcher;
+            owner_scheduler = thisScheduler;
+        }
+        catch (Exception)
+        {}
+
+        void wrap ()
+        {
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
+            thisInfo.ident = spawn_dispatcher;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = owner_scheduler;
+            thisInfo.have_scheduler = false;
+            thisInfo.is_inherited = false;
             op();
         }
 
@@ -1927,6 +2058,10 @@ public class MainScheduler : FiberScheduler
 
 public @property ref ThreadInfo thisInfo () nothrow
 {
+    auto f = cast(InfoFiber) Fiber.getThis();
+
+    if (f !is null)
+        return f.info;
     return ThreadInfo.thisInfo;
 }
 
@@ -2156,6 +2291,23 @@ public MessageDispatcher spawnFiber (void delegate () op)
     return spawn_dispatcher;
 }
 
+public void spawnStartFiber (void delegate () op)
+{
+    auto spawn_dispatcher = thisMessageDispatcher;
+    auto owner_dispatcher = ownerMessageDispatcher;
+    auto owner_scheduler = thisScheduler;
+
+    thisScheduler.spawn(
+    {
+        thisInfo.ident = spawn_dispatcher;
+        thisInfo.owner = owner_dispatcher;
+        thisInfo.scheduler = owner_scheduler;
+        thisInfo.have_scheduler = false;
+        thisInfo.is_inherited = false;
+        op();
+    });
+}
+
 public void spawnInheritedFiber (void delegate () op)
 {
     auto spawn_dispatcher = thisMessageDispatcher;
@@ -2337,7 +2489,7 @@ public class LocalRemoteScheduler : FiberScheduler
         this.wait_manager = new WaitManager(this);
     }
 }
-
+/*
 ///
 @system unittest
 {
@@ -2699,3 +2851,4 @@ unittest
         thisInfo.cleanup(true);
     });
 }
+*/

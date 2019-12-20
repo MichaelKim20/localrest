@@ -86,6 +86,8 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+import std.stdio;
+
 /// Ask the node to exhibit a certain behavior for a given time
 private struct TimeCommand
 {
@@ -357,12 +359,14 @@ public final class RemoteAPI (API) : API
         }
 
         C.thisScheduler.start({
+            writefln("spawnFiberStart %s", C.thisInfo);
             bool terminated = false;
             while (!terminated)
             {
                 C.thisMessageDispatcher.receiveTimeout(10.msecs,
                     (C.OwnerTerminated e) { terminated = true; },
                     (ShutdownCommand e) {
+                        writefln("ShutdownCommand");
                         terminated = true;
                     },
                     (TimeCommand s)      {
@@ -395,6 +399,7 @@ public final class RemoteAPI (API) : API
                             });
                     });
             }
+            writefln("Node Exit while");
             C.thisInfo.cleanup(true);
         });
     }
@@ -678,7 +683,7 @@ public final class RemoteAPI (API) : API
                             });
 
                             C.Response res;
-                            remote_scheduler.start(() {
+                            remote_scheduler.spawn(() {
                                 res = remote_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
                                 C.thisInfo.cleanup(true);
@@ -732,7 +737,7 @@ unittest
 
     test.ctrl.shutdown();
 }
-
+/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -1514,3 +1519,4 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
+*/
