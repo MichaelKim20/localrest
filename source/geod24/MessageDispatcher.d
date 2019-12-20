@@ -949,10 +949,10 @@ public class MessageDispatcher
         if (Fiber.getThis())
             this.mbox.put(msg);
         else
-            spawnInheritedFiber(
+            spawnChildFiber(
             {
                 this.mbox.put(msg);
-            });
+            }, false, true);
     }
 
 
@@ -970,11 +970,11 @@ public class MessageDispatcher
         else
         {
             auto cond = thisScheduler.newCondition(null);
-            spawnInheritedFiber(
+            spawnChildFiber(
             {
                 this.mbox.get(ops);
                 cond.notify();
-            });
+            }, false, true);
             cond.wait();
         }
     }
@@ -1004,11 +1004,11 @@ public class MessageDispatcher
         {
             receiveOnlyRet!(T) ret;
             auto cond = thisScheduler.newCondition(null);
-            spawnInheritedFiber(
+            spawnChildFiber(
             {
                 ret = _receiveOnly!T();
                 cond.notify();
-            });
+            }, false, true);
             cond.wait();
 
             return ret;
@@ -1071,11 +1071,11 @@ public class MessageDispatcher
         {
             bool res;
             auto cond = thisScheduler.newCondition(null);
-            spawnInheritedFiber(
+            spawnChildFiber(
             {
                 res = this.mbox.get(duration, ops);
                 cond.notify();
-            });
+            }, false, true);
             cond.wait();
             return res;
         }
@@ -1421,6 +1421,15 @@ private static class InfoFiber : Fiber
     public this (void delegate () op) nothrow
     {
         super(op);
+    }
+
+    public @property ref ThreadInfo thisInfo () nothrow
+    {
+        auto f = cast(InfoFiber) Fiber.getThis();
+
+        if (f !is null)
+            return f.info;
+        return ThreadInfo.thisInfo;
     }
 }
 
@@ -1927,6 +1936,11 @@ public class MainScheduler : FiberScheduler
 
 public @property ref ThreadInfo thisInfo () nothrow
 {
+    auto f = cast(InfoFiber) Fiber.getThis();
+
+    if (f !is null)
+        return f.info;
+
     return ThreadInfo.thisInfo;
 }
 
@@ -2173,6 +2187,41 @@ public void spawnInheritedFiber (void delegate () op)
     });
 }
 
+public void spawnChildFiber (void delegate () op, bool have_scheduler = false, bool is_inherited = false)
+{
+    auto spawn_dispatcher = thisMessageDispatcher;
+    auto owner_dispatcher = ownerMessageDispatcher;
+    auto owner_scheduler = thisScheduler;
+
+    thisScheduler.spawn(
+    {
+        thisInfo.ident = spawn_dispatcher;
+        thisInfo.owner = owner_dispatcher;
+        thisInfo.scheduler = owner_scheduler;
+        thisInfo.have_scheduler = have_scheduler;
+        thisInfo.is_inherited = is_inherited;
+        op();
+    });
+}
+
+
+public void startChildFiber (void delegate () op, bool have_scheduler = false, bool is_inherited = false)
+{
+    auto spawn_dispatcher = thisMessageDispatcher;
+    auto owner_dispatcher = ownerMessageDispatcher;
+    auto owner_scheduler = thisScheduler;
+
+    thisScheduler.start(
+    {
+        thisInfo.ident = spawn_dispatcher;
+        thisInfo.owner = owner_dispatcher;
+        thisInfo.scheduler = owner_scheduler;
+        thisInfo.have_scheduler = have_scheduler;
+        thisInfo.is_inherited = is_inherited;
+        op();
+    });
+}
+
 /// Execution to another scheduled Fiber.
 void yield ()
 {
@@ -2337,7 +2386,7 @@ public class LocalRemoteScheduler : FiberScheduler
         this.wait_manager = new WaitManager(this);
     }
 }
-
+/*
 ///
 @system unittest
 {
@@ -2648,14 +2697,14 @@ version (unittest)
     static assert( __traits(compiles, spawnThread(callable10, 10)));
     static assert( __traits(compiles, spawnThread(callable11, 11)));
 }
-
+*/
 unittest
 {
     import std.concurrency;
 
     auto process = (MessageDispatcher owner)
     {
-        thisScheduler.start({
+        startChildFiber({
             size_t message_count = 2;
             while (message_count--)
             {
@@ -2671,7 +2720,7 @@ unittest
                 );
             }
             thisInfo.cleanup(true);
-        });
+        }, false, false);
     };
 
     auto spawnedMessageDispatcher = spawnThread(process, thisMessageDispatcher);
@@ -2681,7 +2730,7 @@ unittest
     int got_i;
     string got_s;
 
-    thisScheduler.spawn({
+    spawnChildFiber({
         thisMessageDispatcher.receive(
             (string s)
             {
@@ -2697,5 +2746,5 @@ unittest
         assert(got_i == 42);
         assert(got_s == "string");
         thisInfo.cleanup(true);
-    });
+    }, false, true);
 }
