@@ -140,7 +140,7 @@ private struct ArgWrapper (T...)
 public void runTask (scope void delegate() dg)
 {
     assert(C.thisScheduler !is null, "Cannot call this function from the main thread");
-    C.thisScheduler.spawn(dg);
+    C.spawnSchedulerFiber(dg);
 }
 
 /// Ditto
@@ -343,7 +343,7 @@ public final class RemoteAPI (API) : API
         {
             static if (is(T == C.Command))
             {
-                node_scheduler.spawn({
+                C.spawnSchedulerFiber({
                     handleCommand(arg, node, control.filter);
                 });
             }
@@ -356,7 +356,7 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
-        C.thisScheduler.start({
+        C.startSchedulerFiber({
             bool terminated = false;
             while (!terminated)
             {
@@ -377,7 +377,7 @@ public final class RemoteAPI (API) : API
                         if (!isSleeping())
                             handle(res);
                         else if (!control.drop)
-                            node_scheduler.spawn({
+                            C.spawnSchedulerFiber({
                                 while (isSleeping())
                                     node_scheduler.yield();
                                 handle(res);
@@ -388,7 +388,7 @@ public final class RemoteAPI (API) : API
                         if (!isSleeping())
                             handle(cmd);
                         else if (!control.drop)
-                            node_scheduler.spawn({
+                            C.spawnSchedulerFiber({
                                 while (isSleeping())
                                     node_scheduler.yield();
                                 handle(cmd);
@@ -624,7 +624,7 @@ public final class RemoteAPI (API) : API
                             this.childTid.send(command);
 
                             bool terminated = false;
-                            main_scheduler.spawn(() {
+                            C.spawnSchedulerFiber(() {
                                 while (!terminated)
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
@@ -636,7 +636,7 @@ public final class RemoteAPI (API) : API
                             });
 
                             C.Response res;
-                            main_scheduler.spawn(() {
+                            C.spawnSchedulerFiber(() {
                                 res = main_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
                             });
@@ -665,7 +665,7 @@ public final class RemoteAPI (API) : API
                             C.Command command = C.Command(C.thisMessageDispatcher(), remote_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             bool terminated = false;
-                            remote_scheduler.spawn(() {
+                            C.spawnSchedulerFiber(() {
                                 this.childTid.send(command);
                                 while (!terminated)
                                 {
@@ -678,7 +678,7 @@ public final class RemoteAPI (API) : API
                             });
 
                             C.Response res;
-                            remote_scheduler.start(() {
+                            C.startSchedulerFiber(() {
                                 res = remote_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
                                 C.thisInfo.cleanup(true);
@@ -733,7 +733,6 @@ unittest
     test.ctrl.shutdown();
 }
 
-/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -815,7 +814,7 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        thisScheduler.start({
+        C.startSchedulerFiber({
             parent.send(42);
             thisInfo.cleanup(true);
         });
@@ -1515,4 +1514,4 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
-*/
+
