@@ -2377,10 +2377,10 @@ public class LocalRemoteScheduler : FiberScheduler
     }
 
     // Start spawnedFunc in a new thread.
-    auto childMessageDispatcher = spawnThread(&spawnedFunc, thisMessageDispatcher);
+    auto spawned_msg_dispatcher = spawnThread(&spawnedFunc, thisMessageDispatcher);
 
     // Send the number 42 to this new thread.
-    childMessageDispatcher.send(42);
+    spawned_msg_dispatcher.send(42);
 
     // Receive the result code.
     auto wasSuccessful = thisMessageDispatcher.receiveOnly!(bool);
@@ -2428,24 +2428,24 @@ public class LocalRemoteScheduler : FiberScheduler
     };
 
     {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(42);
+        auto spawned_msg_dispatcher = spawnThread(process);
+        spawned_msg_dispatcher.send(42);
         thisMessageDispatcher.receive((int res) {
             assert(res == 1);
         });
     }
 
     {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(3.14);
+        auto spawned_msg_dispatcher = spawnThread(process);
+        spawned_msg_dispatcher.send(3.14);
         thisMessageDispatcher.receive((int res) {
             assert(res == 2);
         });
     }
 
     {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send("something else");
+        auto spawned_msg_dispatcher = spawnThread(process);
+        spawned_msg_dispatcher.send("something else");
         thisMessageDispatcher.receive((int res) {
             assert(res == 3);
         });
@@ -2488,27 +2488,27 @@ version (unittest)
 ///
 @system unittest
 {
-    auto spawnedMessageDispatcher = spawnThread(
+    auto spawned_msg_dispatcher = spawnThread(
     {
         startSchedulerFiber({
             assert(thisMessageDispatcher.receiveOnly!int == 42);
             thisInfo.cleanup(true);
         });
     });
-    spawnedMessageDispatcher.send(42);
+    spawned_msg_dispatcher.send(42);
 }
 
 ///
 @system unittest
 {
-    auto spawnedMessageDispatcher = spawnThread(
+    auto spawned_msg_dispatcher = spawnThread(
     {
         startSchedulerFiber({
             assert(thisMessageDispatcher.receiveOnly!string == "text");
             thisInfo.cleanup(true);
         });
     });
-    spawnedMessageDispatcher.send("text");
+    spawned_msg_dispatcher.send("text");
 }
 
 ///
@@ -2516,7 +2516,7 @@ version (unittest)
 {
     struct Record { string name; int age; }
 
-    auto spawnedMessageDispatcher = spawnThread(
+    auto spawned_msg_dispatcher = spawnThread(
     {
         startSchedulerFiber({
             auto msg = thisMessageDispatcher.receiveOnly!(double, Record);
@@ -2527,7 +2527,7 @@ version (unittest)
         });
     });
 
-    spawnedMessageDispatcher.send(0.5, Record("Alice", 31));
+    spawned_msg_dispatcher.send(0.5, Record("Alice", 31));
 }
 
 @system unittest
@@ -2548,8 +2548,8 @@ version (unittest)
         });
     }
 
-    auto spawnedMessageDispatcher = spawnThread(&t1, thisMessageDispatcher);
-    spawnedMessageDispatcher.send(1);
+    auto spawned_msg_dispatcher = spawnThread(&t1, thisMessageDispatcher);
+    spawned_msg_dispatcher.send(1);
     string result = thisMessageDispatcher.receiveOnly!string();
     assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
@@ -2665,8 +2665,6 @@ version (unittest)
 
 unittest
 {
-    import std.concurrency;
-
     auto process = (MessageDispatcher owner)
     {
         startSchedulerFiber({
@@ -2688,9 +2686,9 @@ unittest
         });
     };
 
-    auto spawnedMessageDispatcher = spawnThread(process, thisMessageDispatcher);
-    spawnedMessageDispatcher.send(42);
-    spawnedMessageDispatcher.send("string");
+    auto spawned_msg_dispatcher = spawnThread(process, thisMessageDispatcher);
+    spawned_msg_dispatcher.send(42);
+    spawned_msg_dispatcher.send("string");
 
     int got_i;
     string got_s;

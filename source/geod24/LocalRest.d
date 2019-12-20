@@ -1514,4 +1514,3 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
-
