@@ -2,7 +2,7 @@
 
     Registry implementation for multi-threaded access
 
-    This registry allows to look up a `Tid` based on a `string`.
+    This registry allows to look up a `ServerTransceiver` based on a `string`.
     It is extracted from the `std.concurrency` module to make it reusable
 
 *******************************************************************************/
@@ -11,12 +11,13 @@ module geod24.Registry;
 
 import core.sync.mutex;
 import geod24.concurrency;
+import geod24.Transceiver;
 
 /// Ditto
 public shared struct Registry
 {
-    private Tid[string] tidByName;
-    private string[][Tid] namesByTid;
+    private ServerTransceiver[string] tidByName;
+    private string[][ServerTransceiver] namesByServerTransceiver;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -26,21 +27,21 @@ public shared struct Registry
     }
 
     /**
-     * Gets the Tid associated with name.
+     * Gets the ServerTransceiver associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Tid or Tid.init if name is not registered.
+     *  The associated ServerTransceiver or ServerTransceiver.init if name is not registered.
      */
-    Tid locate(string name)
+    ServerTransceiver locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
-                return *cast(Tid*)tid;
-            return Tid.init;
+            if (shared(ServerTransceiver)* tid = name in this.tidByName)
+                return *cast(ServerTransceiver*)tid;
+            return ServerTransceiver.init;
         }
     }
 
@@ -59,15 +60,15 @@ public shared struct Registry
      *  true if the name is available and tid is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Tid tid)
+    bool register(string name, ServerTransceiver tid)
     {
         synchronized (registryLock)
         {
             if (name in tidByName)
                 return false;
-            if (tid.mbox.isClosed)
-                return false;
-            this.namesByTid[tid] ~= name;
+            //if (tid.mbox.isClosed)
+            //    return false;
+            this.namesByServerTransceiver[tid] ~= name;
             this.tidByName[name] = cast(shared)tid;
             return true;
         }
@@ -89,9 +90,9 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
+            if (shared(ServerTransceiver)* tid = name in this.tidByName)
             {
-                auto allNames = *cast(Tid*)tid in this.namesByTid;
+                auto allNames = *cast(ServerTransceiver*)tid in this.namesByServerTransceiver;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
                 this.tidByName.remove(name);
