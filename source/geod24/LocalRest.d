@@ -60,7 +60,7 @@
 
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
-    to the ServerTransceiver. Messages consist of the sender's ServerTransceiver, the mangled name
+    to the Transceiver. Messages consist of the sender's Transceiver, the mangled name
     of the function to call (to support overloading) and the arguments,
     serialized as a JSON string.
 
@@ -70,8 +70,8 @@
     as Vibe.d is the only available JSON module known to the author
     to provide an interface to deserialize composite types.
 
-    Removed ServerTransceiver
-    Added ITransceiver
+    Removed Transceiver
+    Added Transceiver
 
     Author:         Mathias 'Geod24' Lang
     License:        MIT (See LICENSE.txt)
@@ -215,34 +215,6 @@ public @property void thisWaitingManager (WaitingManager value) nothrow
 }
 
 
-
-/***************************************************************************
-
-    Getter of ITransceiver assigned to a called thread.
-
-***************************************************************************/
-
-public @property ITransceiver thisTransceiver () nothrow
-{
-    if (auto p = "ITransceiver" in thisInfo.objectValues)
-        return cast(ITransceiver)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of ITransceiver assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisTransceiver (ITransceiver value) nothrow
-{
-    thisInfo.objectValues["ITransceiver"] = cast(Object)value;
-}
-
-
 /*******************************************************************************
 
     Receive requests, To obtain and return results by passing
@@ -260,7 +232,7 @@ private class Server (API)
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `ServerTransceiver`
+        In practice, this means there should only be one `Transceiver`
         per "address".
 
         Note:
@@ -354,7 +326,7 @@ private class Server (API)
         Main dispatch function
 
         This function receive string-serialized messages from the calling thread,
-        which is a struct with the sender's ITransceiver, the method's mangleof,
+        which is a struct with the sender's Transceiver, the method's mangleof,
         and the method's arguments as a tuple, serialized to a JSON string.
 
         Params:
@@ -363,15 +335,14 @@ private class Server (API)
 
     ***************************************************************************/
 
-    private static ServerTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
+    private static Transceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
 
-        ServerTransceiver transceiver = new ServerTransceiver();
+        Transceiver transceiver = new Transceiver();
         WaitingManager waitingManager = new WaitingManager();
-        auto thread_scheduler = ThreadScheduler.instance;
 
         // used for controling filtering / sleep
         struct Control
@@ -381,9 +352,8 @@ private class Server (API)
             bool drop;           // drop messages if sleeping
         }
 
-        auto cond = thread_scheduler.newCondition(null);
-        thread_scheduler.spawn({
-
+        auto cond = ThreadScheduler.instance.newCondition(null);
+        ThreadScheduler.instance.spawn({
             scope node = new Implementation(cargs);
 
             Control control;
@@ -422,7 +392,7 @@ private class Server (API)
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
-                        msg = transceiver.chan.receive();
+                        msg = transceiver.receive();
 
                         if (terminate)
                             break;
@@ -465,7 +435,7 @@ private class Server (API)
                             break;
 
                             default :
-                                assert(0);
+                                assert(0, "Unexpected type: " ~ msg.tag);
                         }
                     }
                 });
@@ -489,18 +459,18 @@ private class Server (API)
                     }
                 });
 
-                thread_scheduler.notify(cond);
+                ThreadScheduler.instance.notify(cond);
             });
         });
 
         //  Wait for the node to be created.
-        thread_scheduler.wait(cond);
+        ThreadScheduler.instance.wait(cond);
 
         return transceiver;
     }
 
     /// Devices that can receive requests.
-    private ServerTransceiver _transceiver;
+    private Transceiver _transceiver;
 
 
     /***************************************************************************
@@ -508,12 +478,12 @@ private class Server (API)
         Create an instante of a `Server`
 
         Params:
-            transceiver = This is an instance of `ServerTransceiver` and
+            transceiver = This is an instance of `Transceiver` and
                 a device that can receive requests.
 
     ***************************************************************************/
 
-    public this (ServerTransceiver transceiver) @nogc pure nothrow
+    public this (Transceiver transceiver) @nogc pure nothrow
     {
         this._transceiver = transceiver;
     }
@@ -521,15 +491,15 @@ private class Server (API)
 
     /***************************************************************************
 
-        Returns the `ServerTransceiver`
+        Returns the `Transceiver`
 
         This can be useful for calling `geod24.concurrency.register` or similar.
-        Note that the `ServerTransceiver` should not be used directly,
+        Note that the `Transceiver` should not be used directly,
         as our event loop, would error out on an unknown message.
 
     ***************************************************************************/
 
-    @property public ServerTransceiver transceiver () @safe nothrow
+    @property public Transceiver transceiver () @safe nothrow
     {
         return this._transceiver;
     }
@@ -558,7 +528,7 @@ private class Server (API)
 private class Client
 {
     /// Devices that can receive a response
-    private ClientTransceiver _transceiver;
+    private Transceiver _transceiver;
 
     /// After making the request, wait until the response comes,
     /// and find the response that suits the request.
@@ -573,7 +543,7 @@ private class Client
     /// Ctor
     public this (Duration timeout = Duration.init) @safe nothrow
     {
-        this._transceiver = new ClientTransceiver;
+        this._transceiver = new Transceiver;
         this._waitingManager = new WaitingManager();
         this._timeout = timeout;
     }
@@ -589,7 +559,7 @@ private class Client
 
     ***************************************************************************/
 
-    @property public ClientTransceiver transceiver () @safe nothrow
+    @property public Transceiver transceiver () @safe nothrow
     {
         return this._transceiver;
     }
@@ -600,13 +570,13 @@ private class Client
         This enables appropriate responses to requests through the API
 
         Params:
-           remote = Instance of ServerTransceiver
+           remote = Instance of Transceiver
            req = `Request`
            res = `Response`
 
     ***************************************************************************/
 
-    public Response router (ServerTransceiver remote, string method, string args) @trusted
+    public Response router (Transceiver remote, string method, string args) @trusted
     {
         Request req;
         Response res;
@@ -633,7 +603,7 @@ private class Client
             scheduler.spawn({
                 while (!this._terminate)
                 {
-                    Message msg = this._transceiver.chan.receive();
+                    Message msg = this._transceiver.receive();
 
                     if (this._terminate)
                         break;
@@ -659,6 +629,7 @@ private class Client
 
         return res;
     }
+
 
     /***************************************************************************
 
@@ -738,7 +709,7 @@ public class RemoteAPI (API) : API
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `ServerTransceiver`
+        In practice, this means there should only be one `Transceiver`
         per "address".
 
         Note:
@@ -765,7 +736,7 @@ public class RemoteAPI (API) : API
     }
 
     /// A device that can requests.
-    private ServerTransceiver _server_transceiver;
+    private Transceiver _server_transceiver;
 
     /// Request to the `Server`, receive a response
     private Client _client;
@@ -782,12 +753,12 @@ public class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-            transceiver = `ServerTransceiver` of the node.
+            transceiver = `Transceiver` of the node.
             timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (ServerTransceiver transceiver, Duration timeout = Duration.init) @safe nothrow
+    public this (Transceiver transceiver, Duration timeout = Duration.init) @safe nothrow
     {
         this._server_transceiver = transceiver;
         this._client = new Client(timeout);
@@ -813,11 +784,11 @@ public class RemoteAPI (API) : API
 
         /***********************************************************************
 
-            Returns the `ServerTransceiver`
+            Returns the `Transceiver`
 
         ***********************************************************************/
 
-        @property public ServerTransceiver transceiver () @safe nothrow
+        @property public Transceiver transceiver () @safe nothrow
         {
             return this._server_transceiver;
         }
@@ -1143,7 +1114,7 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(ServerTransceiver masterTransceiver)
+        this(Transceiver masterTransceiver)
         {
             this.master = new RemoteAPI!API(masterTransceiver);
         }
@@ -1195,7 +1166,7 @@ unittest
     import geod24.concurrency;
     import std.format;
 
-    __gshared ServerTransceiver[string] tbn;
+    __gshared Transceiver[string] tbn;
 
     static interface API
     {
@@ -1331,7 +1302,7 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    __gshared ServerTransceiver n1transceive;
+    __gshared Transceiver n1transceive;
 
     static interface API
     {
@@ -1401,7 +1372,7 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared ServerTransceiver node_tid;
+    __gshared Transceiver node_tid;
 
     static interface API
     {
@@ -1626,7 +1597,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1666,7 +1637,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1708,7 +1679,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1745,7 +1716,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {

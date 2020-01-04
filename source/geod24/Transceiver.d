@@ -18,8 +18,8 @@ import core.time;
 /// Data sent by the caller
 public struct Request
 {
-    /// ITransceiver of the sender thread
-    ITransceiver sender;
+    /// Transceiver of the sender thread
+    Transceiver sender;
 
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response`
@@ -129,43 +129,7 @@ static struct Message
 
 *******************************************************************************/
 
-public interface ITransceiver
-{
-    /***************************************************************************
-
-        It is a function that accepts `Request`.
-
-    ***************************************************************************/
-
-    void send (Request msg);
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Response`.
-
-    ***************************************************************************/
-
-    void send (Response msg);
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this ServerTransceiver.
-
-    ***************************************************************************/
-
-    void toString (scope void delegate(const(char)[]) sink);
-}
-
-
-/*******************************************************************************
-
-    Accept only Request. It has `Channel!Request`
-
-*******************************************************************************/
-
-public class ServerTransceiver : ITransceiver
+public class Transceiver
 {
     /// Channel of Request
     public Channel!Message chan;
@@ -176,118 +140,109 @@ public class ServerTransceiver : ITransceiver
         chan = new Channel!Message();
     }
 
-
     /***************************************************************************
 
-        It is a function that accepts `Request`.
+        It is a function that accepts Message
 
     ***************************************************************************/
 
-    public void send (Request msg) @trusted
+    public void send (Message msg) @trusted
     {
         if (thisScheduler !is null)
-            this.chan.send(Message(msg));
+            this.chan.send(msg);
         else
         {
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.chan.send(Message(msg));
+                this.chan.send(msg);
                 condition.notify();
             });
             condition.wait();
         }
     }
 
+    /***************************************************************************
+
+        It is a function that accepts Request
+
+    ***************************************************************************/
+
+    public void send (Request msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
 
     /***************************************************************************
 
-        It is a function that accepts `TimeCommand`.
+        It is a function that accepts Response
+
+    ***************************************************************************/
+
+    public void send (Response msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts TimeCommand
 
     ***************************************************************************/
 
     public void send (TimeCommand msg) @trusted
     {
-        if (thisScheduler !is null)
-            this.chan.send(Message(msg));
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.chan.send(Message(msg));
-                condition.notify();
-            });
-            condition.wait();
-        }
+        this.send(Message(msg));
     }
 
 
     /***************************************************************************
 
-        It is a function that accepts `TimeCommand`.
+        It is a function that accepts ShutdownCommand
 
     ***************************************************************************/
 
     public void send (ShutdownCommand msg) @trusted
     {
-        if (thisScheduler !is null)
-            this.chan.send(Message(msg));
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.chan.send(Message(msg));
-                condition.notify();
-            });
-            condition.wait();
-        }
+        this.send(Message(msg));
     }
 
 
     /***************************************************************************
 
-        It is a function that accepts `FilterAPI`.
+        It is a function that accepts FilterAPI
 
     ***************************************************************************/
 
     public void send (FilterAPI msg) @trusted
     {
-        if (thisScheduler !is null)
-            this.chan.send(Message(msg));
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.chan.send(Message(msg));
-                condition.notify();
-            });
-            condition.wait();
-        }
+        this.send(Message(msg));
     }
 
 
     /***************************************************************************
 
-        It is a function that accepts `Response`.
+        Return the received message.
 
     ***************************************************************************/
 
-    public void send (Response msg) @trusted
+    public Message receive () @trusted
     {
         if (thisScheduler !is null)
-            this.chan.send(Message(msg));
+            return this.chan.receive();
         else
         {
+            Message msg;
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.chan.send(Message(msg));
+                msg = this.chan.receive();
                 condition.notify();
             });
             condition.wait();
+            return msg;
         }
     }
 
@@ -306,93 +261,40 @@ public class ServerTransceiver : ITransceiver
 
     /***************************************************************************
 
-        Generate a convenient string for identifying this ServerTransceiver.
+        Generate a convenient string for identifying this Transceiver.
 
     ***************************************************************************/
 
     public void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
-        formattedWrite(sink, "STR(%x)", cast(void*) chan);
+        formattedWrite(sink, "TR(%x)", cast(void*) chan);
     }
 }
 
 
-/*******************************************************************************
+/***************************************************************************
 
-    Accept only Response. It has `Channel!Response`
+    Getter of Transceiver assigned to a called thread.
 
-*******************************************************************************/
+***************************************************************************/
 
-public class ClientTransceiver : ITransceiver
+public @property Transceiver thisTransceiver () nothrow
 {
-    /// Channel of Response
-    public Channel!Message chan;
-
-    /// Ctor
-    public this () @safe nothrow
-    {
-        chan = new Channel!Message();
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Request`.
-        It is not use.
-
-    ***************************************************************************/
-
-    public void send (Request msg) @trusted
-    {
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Response`.
-
-    ***************************************************************************/
-
-    public void send (Response msg) @trusted
-    {
-        if (thisScheduler !is null)
-            this.chan.send(Message(msg));
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.chan.send(Message(msg));
-                condition.notify();
-            });
-            condition.wait();
-        }
-    }
-
-
-    /***************************************************************************
-
-        Close the `Channel`
-
-    ***************************************************************************/
-
-    public void close () @trusted
-    {
-        this.chan.close();
-    }
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this ServerTransceiver.
-
-    ***************************************************************************/
-
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "CTR(%x)", cast(void*) chan);
-    }
+    if (auto p = "Transceiver" in thisInfo.objectValues)
+        return cast(Transceiver)(*p);
+    else
+        return null;
 }
 
+
+/***************************************************************************
+
+    Setter of Transceiver assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisTransceiver (Transceiver value) nothrow
+{
+    thisInfo.objectValues["Transceiver"] = cast(Object)value;
+}
