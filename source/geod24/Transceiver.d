@@ -66,16 +66,6 @@ public struct Response
     string data;
 };
 
-
-/// Ask the node to exhibit a certain behavior for a given time
-public struct TimeCommand
-{
-    /// For how long our remote node apply this behavior
-    Duration dur;
-    /// Whether or not affected messages should be dropped
-    bool drop = false;
-}
-
 /// Filter out requests before they reach a node
 public struct FilterAPI
 {
@@ -86,6 +76,51 @@ public struct FilterAPI
     string pretty_func;
 }
 
+/// Ask the node to exhibit a certain behavior for a given time
+public struct TimeCommand
+{
+    /// For how long our remote node apply this behavior
+    Duration dur;
+    /// Whether or not affected messages should be dropped
+    bool drop = false;
+}
+
+/// Ask the node to shut down
+public struct ShutdownCommand
+{
+}
+
+/// Status of a request
+public enum MessageType
+{
+    request,
+    response,
+    filter,
+    time_command,
+    shutdown_command
+};
+
+// very simple & limited variant, to keep it performant.
+// should be replaced by a real Variant later
+static struct Message
+{
+    this (Request msg) { this.req = msg; this.tag = MessageType.request; }
+    this (Response msg) { this.res = msg; this.tag = MessageType.response; }
+    this (FilterAPI msg) { this.filter = msg; this.tag = MessageType.filter; }
+    this (TimeCommand msg) { this.time = msg; this.tag = MessageType.time_command; }
+    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = MessageType.shutdown_command; }
+
+    union
+    {
+        Request req;
+        Response res;
+        FilterAPI filter;
+        TimeCommand time;
+        ShutdownCommand shutdown;
+    }
+
+    ubyte tag;
+}
 
 /*******************************************************************************
 
@@ -133,24 +168,12 @@ public interface ITransceiver
 public class ServerTransceiver : ITransceiver
 {
     /// Channel of Request
-    public Channel!Request req;
-
-    /// Channel of TimeCommand - Using for sleeping
-    public Channel!TimeCommand ctrl_time;
-
-    /// Channel of FilterAPI - Using for filtering
-    public Channel!FilterAPI ctrl_filter;
-
-    /// Channel of Response
-    public Channel!Response res;
+    public Channel!Message chan;
 
     /// Ctor
     public this () @safe nothrow
     {
-        req = new Channel!Request();
-        ctrl_time = new Channel!TimeCommand();
-        ctrl_filter = new Channel!FilterAPI();
-        res = new Channel!Response();
+        chan = new Channel!Message();
     }
 
 
@@ -163,13 +186,13 @@ public class ServerTransceiver : ITransceiver
     public void send (Request msg) @trusted
     {
         if (thisScheduler !is null)
-            this.req.send(msg);
+            this.chan.send(Message(msg));
         else
         {
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.req.send(msg);
+                this.chan.send(Message(msg));
                 condition.notify();
             });
             condition.wait();
@@ -186,13 +209,36 @@ public class ServerTransceiver : ITransceiver
     public void send (TimeCommand msg) @trusted
     {
         if (thisScheduler !is null)
-            this.ctrl_time.send(msg);
+            this.chan.send(Message(msg));
         else
         {
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.ctrl_time.send(msg);
+                this.chan.send(Message(msg));
+                condition.notify();
+            });
+            condition.wait();
+        }
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts `TimeCommand`.
+
+    ***************************************************************************/
+
+    public void send (ShutdownCommand msg) @trusted
+    {
+        if (thisScheduler !is null)
+            this.chan.send(Message(msg));
+        else
+        {
+            auto fiber_scheduler = new FiberScheduler();
+            auto condition = fiber_scheduler.newCondition(null);
+            fiber_scheduler.start({
+                this.chan.send(Message(msg));
                 condition.notify();
             });
             condition.wait();
@@ -209,13 +255,13 @@ public class ServerTransceiver : ITransceiver
     public void send (FilterAPI msg) @trusted
     {
         if (thisScheduler !is null)
-            this.ctrl_filter.send(msg);
+            this.chan.send(Message(msg));
         else
         {
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.ctrl_filter.send(msg);
+                this.chan.send(Message(msg));
                 condition.notify();
             });
             condition.wait();
@@ -232,13 +278,13 @@ public class ServerTransceiver : ITransceiver
     public void send (Response msg) @trusted
     {
         if (thisScheduler !is null)
-            this.res.send(msg);
+            this.chan.send(Message(msg));
         else
         {
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.res.send(msg);
+                this.chan.send(Message(msg));
                 condition.notify();
             });
             condition.wait();
@@ -254,10 +300,7 @@ public class ServerTransceiver : ITransceiver
 
     public void close () @trusted
     {
-        this.req.close();
-        this.ctrl_time.close();
-        this.ctrl_filter.close();
-        this.res.close();
+        this.chan.close();
     }
 
 
@@ -270,7 +313,7 @@ public class ServerTransceiver : ITransceiver
     public void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
-        formattedWrite(sink, "STR(%x:%x)", cast(void*) req, cast(void*) res);
+        formattedWrite(sink, "STR(%x)", cast(void*) chan);
     }
 }
 
@@ -284,12 +327,12 @@ public class ServerTransceiver : ITransceiver
 public class ClientTransceiver : ITransceiver
 {
     /// Channel of Response
-    public Channel!Response res;
+    public Channel!Message chan;
 
     /// Ctor
     public this () @safe nothrow
     {
-        res = new Channel!Response();
+        chan = new Channel!Message();
     }
 
 
@@ -314,13 +357,13 @@ public class ClientTransceiver : ITransceiver
     public void send (Response msg) @trusted
     {
         if (thisScheduler !is null)
-            this.res.send(msg);
+            this.chan.send(Message(msg));
         else
         {
             auto fiber_scheduler = new FiberScheduler();
             auto condition = fiber_scheduler.newCondition(null);
             fiber_scheduler.start({
-                this.res.send(msg);
+                this.chan.send(Message(msg));
                 condition.notify();
             });
             condition.wait();
@@ -336,7 +379,7 @@ public class ClientTransceiver : ITransceiver
 
     public void close () @trusted
     {
-        this.res.close();
+        this.chan.close();
     }
 
 
@@ -349,7 +392,7 @@ public class ClientTransceiver : ITransceiver
     public void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
-        formattedWrite(sink, "CTR(0:%x)", cast(void*) res);
+        formattedWrite(sink, "CTR(%x)", cast(void*) chan);
     }
 }
 

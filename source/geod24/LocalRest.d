@@ -103,9 +103,6 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-/// Commands used to shutdown the server
-const string SHUTDOWN_COMMAND = "shutdown@command";
-
 /*******************************************************************************
 
     After making the request, wait until the response comes,
@@ -400,7 +397,7 @@ private class Server (API)
             void handleReq (Request req)
             {
                 thisScheduler.spawn(() {
-                    Server!(API).handleRequest(req, node, control.filter);
+                    handleRequest(req, node, control.filter);
                 });
             }
 
@@ -420,89 +417,60 @@ private class Server (API)
                 thisWaitingManager = waitingManager;
                 bool terminate = false;
 
-                //  Process a `Request`
+                Message msg;
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
-                        auto req = transceiver.req.receive();
+                        msg = transceiver.chan.receive();
 
-                        if (req.method == SHUTDOWN_COMMAND)
+                        if (terminate)
+                            break;
+
+                        switch (msg.tag)
                         {
-                            terminate = true;
-                            fiber_scheduler.stop();
+                            case MessageType.request :
+                                if (!isSleeping())
+                                    handleReq(msg.req);
+                                else if (!control.drop)
+                                    await_req ~= msg.req;
+                            break;
+
+                            case MessageType.response :
+                                foreach (_; 0..10)
+                                {
+                                    if (waitingManager.exist(msg.res.id))
+                                        break;
+                                    thisScheduler.wait(c, 10.msecs);
+                                }
+
+                                if (!isSleeping())
+                                    handleRes(msg.res);
+                                else if (!control.drop)
+                                    await_res ~= msg.res;
+                            break;
+
+                            case MessageType.filter :
+                                control.filter = msg.filter;
+                            break;
+
+                            case MessageType.time_command :
+                                control.sleep_until = Clock.currTime + msg.time.dur;
+                                control.drop = msg.time.drop;
+                            break;
+
+                            case MessageType.shutdown_command :
+                                terminate = true;
+                                fiber_scheduler.stop();
+                            break;
+
+                            default :
+                                assert(0);
                         }
-
-                        if (terminate)
-                            break;
-
-                        if (!isSleeping())
-                            handleReq(req);
-                        else if (!control.drop)
-                            await_req ~= req;
-
-                        thisScheduler.yield();
                     }
                 });
 
-                //  Process a `TimeCommand`
-                thisScheduler.spawn({
-                    while (!terminate)
-                    {
-                        auto time_command = transceiver.ctrl_time.receive();
-
-                        if (terminate)
-                            break;
-
-                        control.sleep_until = Clock.currTime + time_command.dur;
-                        control.drop = time_command.drop;
-
-                        thisScheduler.yield();
-                    }
-                });
-
-                //  Process a `FilterAPI`
-                thisScheduler.spawn({
-                    while (!terminate)
-                    {
-                        auto filter = transceiver.ctrl_filter.receive();
-
-                        if (terminate)
-                            break;
-
-                        control.filter = filter;
-
-                        thisScheduler.yield();
-                    }
-                });
-
-                //  Process a `Response`
-                thisScheduler.spawn({
-                    auto c = thisScheduler.newCondition(null);
-                    while (!terminate)
-                    {
-                        auto res = transceiver.res.receive();
-
-                        if (terminate)
-                            break;
-
-                        foreach (_; 0..10)
-                        {
-                            if (waitingManager.exist(res.id))
-                                break;
-                            thisScheduler.wait(c, 10.msecs);
-                        }
-
-                        if (!isSleeping())
-                            handleRes(res);
-                        else if (!control.drop)
-                            await_res ~= res;
-
-                        thisScheduler.yield();
-                    }
-                });
-
-                //  Process a `Request` waiting by the command sleep().
+                //  Process waiting by the command sleep().
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
@@ -512,18 +480,7 @@ private class Server (API)
                             await_req.each!(req => handleReq(req));
                             await_req.length = 0;
                             assumeSafeAppend(await_req);
-                        }
-                        thisScheduler.yield();
-                    }
-                });
 
-                //  Process a `Response` waiting by the command sleep().
-                thisScheduler.spawn({
-                    auto c = thisScheduler.newCondition(null);
-                    while (!terminate)
-                    {
-                        if (!isSleeping())
-                        {
                             await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
@@ -586,7 +543,7 @@ private class Server (API)
 
     public void shutdown () @trusted
     {
-        this._transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
+        this._transceiver.send(ShutdownCommand());
         this._transceiver.close();
     }
 }
@@ -676,21 +633,21 @@ private class Client
             scheduler.spawn({
                 while (!this._terminate)
                 {
-                    Response res = this._transceiver.res.receive();
+                    Message msg = this._transceiver.chan.receive();
 
                     if (this._terminate)
                         break;
 
                     foreach (_; 0..10)
                     {
-                        if (this._waitingManager.exist(res.id))
+                        if (this._waitingManager.exist(msg.res.id))
                             break;
                         scheduler.wait(c, 1.msecs);
                     }
 
-                    this._waitingManager.pending = res;
-                    this._waitingManager.waiting[res.id].c.notify();
-                    this._waitingManager.remove(res.id);
+                    this._waitingManager.pending = msg.res;
+                    this._waitingManager.waiting[msg.res.id].c.notify();
+                    this._waitingManager.remove(msg.res.id);
                 }
             });
 
@@ -874,7 +831,7 @@ public class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            this._server_transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
+            this._server_transceiver.send(ShutdownCommand());
             this._server_transceiver.close();
             this._client.shutdown();
         }
