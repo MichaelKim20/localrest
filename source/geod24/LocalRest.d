@@ -404,7 +404,7 @@ private class Server (API)
                                     handleReq(msg.req);
                                 else if (!control.drop)
                                     await_req ~= msg.req;
-                            break;
+                                break;
 
                             case MessageType.response :
                                 foreach (_; 0..10)
@@ -418,27 +418,29 @@ private class Server (API)
                                     handleRes(msg.res);
                                 else if (!control.drop)
                                     await_res ~= msg.res;
-                            break;
+                                break;
 
                             case MessageType.filter :
                                 control.filter = msg.filter;
-                            break;
+                                break;
 
                             case MessageType.time_command :
                                 control.sleep_until = Clock.currTime + msg.time.dur;
                                 control.drop = msg.time.drop;
-                            break;
+                                break;
 
                             case MessageType.shutdown_command :
                                 terminate = true;
-                                fiber_scheduler.stop();
-                            break;
+                                break;
 
                             default :
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
+                        thisScheduler.yield();
                     }
+                    fiber_scheduler.stop();
                 });
+
 
                 //  Process waiting by the command sleep().
                 thisScheduler.spawn({
@@ -454,8 +456,33 @@ private class Server (API)
                             await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
+                            /*
+                            Request[] await_req_backup;
+                            await_req_backup ~= await_req;
+                            await_req.length = 0;
+                            assumeSafeAppend(await_req);
+                            foreach (ref req; await_req_backup)
+                            {
+                                handleReq(req);
+                                thisScheduler.yield();
+                                if (terminate)
+                                    break;
+                            }
+
+                            Response[] await_res_backup;
+                            await_res_backup ~= await_res;
+                            await_res.length = 0;
+                            assumeSafeAppend(await_res);
+                            foreach (ref res; await_res_backup)
+                            {
+                                handleRes(res);
+                                thisScheduler.yield();
+                                if (terminate)
+                                    break;
+                            }
+                            */
                         }
-                        thisScheduler.yield();
+                        thisScheduler.wait(c, 10.msecs);
                     }
                 });
 
@@ -954,6 +981,8 @@ public class RemoteAPI (API) : API
         }
 }
 
+import std.stdio;
+
 /// Simple usage example
 unittest
 {
@@ -982,6 +1011,8 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+
+    writefln("test01");
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1050,36 +1081,33 @@ unittest
     auto node2 = factory("byzantine", 2);
 
     auto chan = new Channel!int;
-    auto thread_scheduler = ThreadScheduler.instance;
-    thread_scheduler.spawn({
+
+    auto cond = ThreadScheduler.instance.newCondition(null);
+    ThreadScheduler.instance.spawn({
         auto fiber_scheduler = new FiberScheduler();
         fiber_scheduler.start({
-            fiber_scheduler.spawn({
-                auto node1 = factory("this does not matter", 1);
-                auto node2 = factory("neither does this", 2);
+            auto node1 = factory("this does not matter", 1);
+            auto node2 = factory("neither does this", 2);
 
-                assert(node1.pubkey() == 42);
-                assert(node1.last() == "pubkey");
-                assert(node2.pubkey() == 0);
-                assert(node2.last() == "pubkey");
+            assert(node1.pubkey() == 42);
+            assert(node1.last() == "pubkey");
+            assert(node2.pubkey() == 0);
+            assert(node2.last() == "pubkey");
 
-                node1.recv(42, Json.init);
-                assert(node1.last() == "recv@2");
-                node1.recv(Json.init);
-                assert(node1.last() == "recv@1");
-                assert(node2.last() == "pubkey");
+            node1.recv(42, Json.init);
+            assert(node1.last() == "recv@2");
+            node1.recv(Json.init);
+            assert(node1.last() == "recv@1");
+            assert(node2.last() == "pubkey");
 
-                node1.ctrl.shutdown();
-                node2.ctrl.shutdown();
+            node1.ctrl.shutdown();
+            node2.ctrl.shutdown();
 
-                chan.send(42);
-            });
-            fiber_scheduler.spawn({
-                auto result = chan.receive();
-                assert(result == 42);
-            });
+            ThreadScheduler.instance.notify(cond);
         });
     });
+    //  Wait for the node to be created.
+    ThreadScheduler.instance.wait(cond);
 }
 
 /// This network have different types of nodes in it
@@ -1158,6 +1186,7 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    writefln("test03");
 }
 
 /// Support for circular nodes call
@@ -1210,6 +1239,7 @@ unittest
 
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    writefln("test04");
 }
 
 /// Nodes can start tasks
@@ -1236,6 +1266,8 @@ unittest
         public override void stop ()
         {
             terminate = true;
+            while (!stoped)
+                sleep(10.msecs);
         }
 
         public override ulong getCounter ()
@@ -1246,15 +1278,18 @@ unittest
 
         private void task ()
         {
+            stoped = false;
             while (!terminate)
             {
                 this.counter++;
                 sleep(50.msecs);
             }
+            stoped = true;
         }
 
         private ulong counter;
         private bool terminate;
+        private bool stoped;
     }
 
     import std.format;
@@ -1270,6 +1305,7 @@ unittest
     assert(node.getCounter() == 0);
     node.stop();
     node.ctrl.shutdown();
+    writefln("test05");
 }
 
 // Sane name insurance policy
@@ -1290,13 +1326,14 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.transceiver == 42);
     assert(node.ctrl.transceiver !is null);
+    node.ctrl.shutdown();
 
     static interface DoesntWork
     {
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
-    node.ctrl.shutdown();
+    writefln("test06");
 }
 
 // Simulate temporary outage
@@ -1323,10 +1360,12 @@ unittest
         RemoteAPI!API remote;
     }
 
+    writefln("test07-1");
     auto n1 = RemoteAPI!API.spawn!Node();
     n1transceive = n1.ctrl.transceiver;
     auto n2 = RemoteAPI!API.spawn!Node();
 
+    writefln("test07-2");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
     assert(1 == n1.call());
@@ -1334,6 +1373,7 @@ unittest
     auto current2 = MonoTime.currTime();
     assert(current2 - current1 < 200.msecs);
 
+    writefln("test07-3");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1342,12 +1382,14 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
+    writefln("test07-4");
     // Wait for n1 to unblock
     assert(2 == n1.call());
     // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
     assert(current4 - current2 >= 1.seconds);
 
+    writefln("test07-5");
     // Now drop many messages
     n1.sleep(1.seconds, true);
     for (size_t i = 0; i < 500; i++)
@@ -1356,6 +1398,7 @@ unittest
     Thread.sleep(1.seconds);
     assert(3 == n1.call());
 
+    writefln("test07-6");
     // Debug output, uncomment if needed
     version (none)
     {
@@ -1365,8 +1408,10 @@ unittest
         writeln("Delta since sleep: ", current4 - current2);
     }
 
+    writefln("test07-7");
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
+    writefln("test07");
 }
 
 // Filter commands
@@ -1506,6 +1551,7 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
+    writefln("test08");
 }
 
 // request timeouts (from main thread)
@@ -1545,6 +1591,7 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test09");
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1589,6 +1636,7 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test10");
 }
 
 // request timeouts (foreign node to another node)
@@ -1627,8 +1675,10 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_transceiver = node_2.ctrl.transceiver;
     node_1.check();
+    Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test11");
 }
 
 // test-case for zombie responses
@@ -1656,7 +1706,7 @@ unittest
             auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
 
             // time-out
-            node.ctrl.sleep(6000.msecs);
+            node.ctrl.sleep(2000.msecs);
             assertThrown!Exception(node.get42());
 
             // no time-out
@@ -1669,8 +1719,10 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_transceiver = node_2.ctrl.transceiver;
     node_1.check();
+    Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test12");
 }
 
 // request timeouts with dropped messages
@@ -1708,6 +1760,7 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test13");
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1749,6 +1802,7 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test14");
 }
 
 // Test explicit shutdown
@@ -1782,4 +1836,5 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+    writefln("test15");
 }

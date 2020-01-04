@@ -1013,7 +1013,8 @@ public class Channel (T)
             return true;
         }
 
-        if ((this.qsize == 0) || (this.queue[].walkLength < this.qsize))
+        //if ((this.qsize == 0) || (this.queue[].walkLength < this.qsize))
+        if (this.queue[].walkLength < this.qsize)
         {
             this.queue.insertBack(msg);
             this.mutex.unlock();
@@ -1183,7 +1184,7 @@ private struct ChannelContext (T)
     //  Waiting Condition
     public Condition condition;
 }
-
+/*
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1316,7 +1317,7 @@ unittest
     thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 4);
 }
-/*
+
 // If the queue size is 0, it will block when it is sent and received on the same thread.
 unittest
 {

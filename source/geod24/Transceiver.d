@@ -137,7 +137,7 @@ public class Transceiver
     /// Ctor
     public this () @safe nothrow
     {
-        chan = new Channel!Message();
+        chan = new Channel!Message(64*1024);
     }
 
     /***************************************************************************
