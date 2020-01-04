@@ -147,10 +147,10 @@ public class ServerTransceiver : ITransceiver
     /// Ctor
     public this () @safe nothrow
     {
-        req = new Channel!Request(1);
-        ctrl_time = new Channel!TimeCommand(1);
-        ctrl_filter = new Channel!FilterAPI(1);
-        res = new Channel!Response(1);
+        req = new Channel!Request();
+        ctrl_time = new Channel!TimeCommand();
+        ctrl_filter = new Channel!FilterAPI();
+        res = new Channel!Response();
     }
 
 
@@ -289,7 +289,7 @@ public class ClientTransceiver : ITransceiver
     /// Ctor
     public this () @safe nothrow
     {
-        res = new Channel!Response(1);
+        res = new Channel!Response();
     }
 
 
