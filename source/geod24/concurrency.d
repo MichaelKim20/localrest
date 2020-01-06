@@ -50,6 +50,10 @@ import core.thread;
 
 import std.stdio;
 
+static ~this ()
+{
+    thisInfo.cleanup(true);
+}
 
 public interface InfoObject
 {
