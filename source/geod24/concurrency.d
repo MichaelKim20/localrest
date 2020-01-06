@@ -367,17 +367,14 @@ public class ThreadScheduler : Scheduler, InfoObject
             scope (exit) {
                 thisInfo.cleanup(true);
                 remove(Thread.getThis());
-                //this.m_threadInfo.remove(Thread.getThis());
+                removeInfo(Thread.getThis());
             }
+            add(Thread.getThis());
+            addInfo(Thread.getThis(), thisInfo);
             thisScheduler = new FiberScheduler();
-            this.m_threadInfos[Thread.getThis()] = thisInfo;
             op();
         });
         t.start();
-        synchronized( this )
-        {
-            m_all[t] = t;
-        }
     }
 
 
@@ -546,34 +543,66 @@ public class ThreadScheduler : Scheduler, InfoObject
     }
     do
     {
+        synchronized(this)
+        {
+            m_all.remove(t);
+        }
+    }
+
+    public final void addInfo (Thread t, ref ThreadInfo info)
+    in
+    {
+        assert( t );
+    }
+    do
+    {
         synchronized( this )
         {
-            m_all.remove( t );
+            m_threadInfos[t] = info;
+        }
+    }
+
+    public final void removeInfo ( Thread t )
+    in
+    {
+        assert( t );
+    }
+    do
+    {
+        synchronized(this)
+        {
+            m_threadInfos.remove(t);
         }
     }
 
     final void joinAll( bool rethrow = true )
     {
-        synchronized( this )
+        synchronized(this)
         {
-            // NOTE: This loop relies on the knowledge that m_all uses the
-            //       Thread object for both the key and the mapped value.
-            foreach ( Thread t; m_all.keys )
+            foreach (Thread t; this.m_all.keys)
             {
-                t.join( rethrow );
+                t.join(rethrow);
             }
         }
     }
 
-    public void writeThreadInfos ()
+    public void cleanup ()
     {
-        foreach (ref infors; m_threadInfos )
+        writefln("Thread count  %s", this.m_all.length);
+        synchronized(this)
         {
-            infors.cleanup(true);
+            if (this.m_all.length > 0)
+            {
+                foreach (ref infors; this.m_threadInfos)
+                {
+                    infors.cleanup(true);
+                }
+                auto cond = this.newCondition(null);
+                this.wait(cond, 1.seconds);
+            }
         }
-
-        import std.stdio;
-        writefln("Thread count : %s", m_all.keys.length);
+        writefln("Thread count  %s", this.m_all.length);
+        this.m_all.clear();
     }
 }
 

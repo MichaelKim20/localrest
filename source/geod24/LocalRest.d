@@ -176,10 +176,13 @@ private class WaitingManager : InfoObject
         return ((id in this.waiting) !is null);
     }
 
+    ///
     public void cleanup (bool root)
     {
-        foreach (ref w; this.waiting)
-            w.c.notify();
+        foreach (k; this.waiting.keys)
+        {
+            this.waiting[k].c.notify();
+        }
     }
 }
 
@@ -1001,7 +1004,7 @@ unittest
     test.ctrl.shutdown();
 
     writefln("test01");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1091,7 +1094,7 @@ unittest
     node1.ctrl.shutdown();
     node2.ctrl.shutdown();
     writefln("test02");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1173,7 +1176,7 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test03");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1228,7 +1231,7 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test04");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1284,7 +1287,7 @@ unittest
     node.ctrl.shutdown();
     writefln("test05");
 
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
 }
 
 // Sane name insurance policy
@@ -1313,7 +1316,7 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     writefln("test06");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1386,7 +1389,7 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
     writefln("test07");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1529,7 +1532,7 @@ unittest
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
     writefln("test08");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1571,7 +1574,7 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test09");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1618,7 +1621,7 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test10");
-    ThreadScheduler.instance.writeThreadInfos();
+    ThreadScheduler.instance.cleanup();
     //ThreadScheduler.instance.joinAll();
 }
 
@@ -1662,8 +1665,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test11");
-    ThreadScheduler.instance.writeThreadInfos();
-    //ThreadScheduler.instance.joinAll();
+    ThreadScheduler.instance.cleanup();
 }
 
 // test-case for zombie responses
@@ -1708,8 +1710,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test12");
-    ThreadScheduler.instance.writeThreadInfos();
-    //ThreadScheduler.instance.joinAll();
+    ThreadScheduler.instance.cleanup();
 }
 
 // request timeouts with dropped messages
@@ -1749,8 +1750,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test13");
-    ThreadScheduler.instance.writeThreadInfos();
-    //ThreadScheduler.instance.joinAll();
+    ThreadScheduler.instance.cleanup();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1793,8 +1793,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test14");
-    ThreadScheduler.instance.writeThreadInfos();
-    //ThreadScheduler.instance.joinAll();
+    ThreadScheduler.instance.cleanup();
 }
 
 // Test explicit shutdown
@@ -1829,6 +1828,5 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
     writefln("test15");
-    ThreadScheduler.instance.writeThreadInfos();
-    //ThreadScheduler.instance.joinAll();
+    ThreadScheduler.instance.cleanup();
 }
