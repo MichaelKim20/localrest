@@ -110,7 +110,7 @@ private struct ArgWrapper (T...)
 
 *******************************************************************************/
 
-private class WaitingManager
+private class WaitingManager : InfoObject
 {
     /// Just a Condition with a state
     private struct Waiting
@@ -175,6 +175,12 @@ private class WaitingManager
     {
         return ((id in this.waiting) !is null);
     }
+
+    public void cleanup (bool root)
+    {
+        foreach (ref w; this.waiting)
+            w.c.notify();
+    }
 }
 
 
@@ -211,7 +217,7 @@ public @property WaitingManager thisWaitingManager () nothrow
 
 public @property void thisWaitingManager (WaitingManager value) nothrow
 {
-    thisInfo.objectValues["WaitingManager"] = cast(Object)value;
+    thisInfo.objectValues["WaitingManager"] = cast(InfoObject)value;
 }
 
 
@@ -381,8 +387,7 @@ private class Server (API)
             Request[] await_req;
             Response[] await_res;
 
-            auto fiber_scheduler = new FiberScheduler();
-            fiber_scheduler.start({
+            thisScheduler.start({
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
                 bool terminate = false;
@@ -438,7 +443,7 @@ private class Server (API)
                         }
                         thisScheduler.yield();
                     }
-                    fiber_scheduler.stop();
+                    thisScheduler.stop();
                 });
 
 
@@ -456,31 +461,6 @@ private class Server (API)
                             await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
-                            /*
-                            Request[] await_req_backup;
-                            await_req_backup ~= await_req;
-                            await_req.length = 0;
-                            assumeSafeAppend(await_req);
-                            foreach (ref req; await_req_backup)
-                            {
-                                handleReq(req);
-                                thisScheduler.yield();
-                                if (terminate)
-                                    break;
-                            }
-
-                            Response[] await_res_backup;
-                            await_res_backup ~= await_res;
-                            await_res.length = 0;
-                            assumeSafeAppend(await_res);
-                            foreach (ref res; await_res_backup)
-                            {
-                                handleRes(res);
-                                thisScheduler.yield();
-                                if (terminate)
-                                    break;
-                            }
-                            */
                         }
                         thisScheduler.wait(c, 10.msecs);
                     }
@@ -829,15 +809,21 @@ public class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            this._server_transceiver.send(ShutdownCommand());
-            this._server_transceiver.close();
-            this._client.shutdown();
+            if (this._server_transceiver)
+            {
+                this._server_transceiver.send(ShutdownCommand());
+                this._server_transceiver.close();
+            }
+
+            if (this._client)
+                this._client.shutdown();
         }
 
 
         public void shutdownClient () @trusted
         {
-            this._client.shutdown();
+            if (this._client)
+                this._client.shutdown();
         }
 
 
@@ -981,6 +967,7 @@ public class RemoteAPI (API) : API
         }
 }
 
+
 import std.stdio;
 
 /// Simple usage example
@@ -1010,9 +997,12 @@ unittest
 
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
+
     test.ctrl.shutdown();
 
     writefln("test01");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1080,34 +1070,29 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    auto chan = new Channel!int;
+    auto node12 = factory("this does not matter", 1);
+    auto node22 = factory("neither does this", 2);
 
-    auto cond = ThreadScheduler.instance.newCondition(null);
-    ThreadScheduler.instance.spawn({
-        auto fiber_scheduler = new FiberScheduler();
-        fiber_scheduler.start({
-            auto node1 = factory("this does not matter", 1);
-            auto node2 = factory("neither does this", 2);
+    assert(node12.pubkey() == 42);
+    assert(node12.last() == "pubkey");
+    assert(node22.pubkey() == 0);
+    assert(node22.last() == "pubkey");
 
-            assert(node1.pubkey() == 42);
-            assert(node1.last() == "pubkey");
-            assert(node2.pubkey() == 0);
-            assert(node2.last() == "pubkey");
+    node12.recv(42, Json.init);
+    assert(node12.last() == "recv@2");
+    node12.recv(Json.init);
+    assert(node12.last() == "recv@1");
+    assert(node22.last() == "pubkey");
 
-            node1.recv(42, Json.init);
-            assert(node1.last() == "recv@2");
-            node1.recv(Json.init);
-            assert(node1.last() == "recv@1");
-            assert(node2.last() == "pubkey");
 
-            node1.ctrl.shutdown();
-            node2.ctrl.shutdown();
+    node12.ctrl.shutdown();
+    node22.ctrl.shutdown();
 
-            ThreadScheduler.instance.notify(cond);
-        });
-    });
-    //  Wait for the node to be created.
-    ThreadScheduler.instance.wait(cond);
+    node1.ctrl.shutdown();
+    node2.ctrl.shutdown();
+    writefln("test02");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 /// This network have different types of nodes in it
@@ -1184,9 +1169,12 @@ unittest
     }
 
     assert(nodes[0].requests() == 7);
+
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test03");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 /// Support for circular nodes call
@@ -1229,7 +1217,7 @@ unittest
     ];
 
     foreach (idx, ref api; nodes)
-        tbn[format("node%d", idx)] = api.transceiver();
+        tbn[format("node%d", idx)] = api.ctrl.transceiver();
     nodes[0].setNext("node1");
     nodes[1].setNext("node2");
     nodes[2].setNext("node0");
@@ -1240,6 +1228,8 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test04");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 /// Nodes can start tasks
@@ -1251,7 +1241,6 @@ unittest
     static interface API
     {
         public void start ();
-        public void stop ();
         public ulong getCounter ();
     }
 
@@ -1259,15 +1248,7 @@ unittest
     {
         public override void start ()
         {
-            terminate = false;
             runTask(&this.task);
-        }
-
-        public override void stop ()
-        {
-            terminate = true;
-            while (!stoped)
-                sleep(10.msecs);
         }
 
         public override ulong getCounter ()
@@ -1278,18 +1259,14 @@ unittest
 
         private void task ()
         {
-            stoped = false;
-            while (!terminate)
+            while (true)
             {
                 this.counter++;
                 sleep(50.msecs);
             }
-            stoped = true;
         }
 
         private ulong counter;
-        private bool terminate;
-        private bool stoped;
     }
 
     import std.format;
@@ -1303,9 +1280,11 @@ unittest
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
-    node.stop();
+
     node.ctrl.shutdown();
     writefln("test05");
+
+    ThreadScheduler.instance.writeThreadInfos();
 }
 
 // Sane name insurance policy
@@ -1334,6 +1313,8 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     writefln("test06");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // Simulate temporary outage
@@ -1360,12 +1341,10 @@ unittest
         RemoteAPI!API remote;
     }
 
-    writefln("test07-1");
     auto n1 = RemoteAPI!API.spawn!Node();
     n1transceive = n1.ctrl.transceiver;
     auto n2 = RemoteAPI!API.spawn!Node();
 
-    writefln("test07-2");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
     assert(1 == n1.call());
@@ -1373,7 +1352,6 @@ unittest
     auto current2 = MonoTime.currTime();
     assert(current2 - current1 < 200.msecs);
 
-    writefln("test07-3");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1382,14 +1360,12 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
-    writefln("test07-4");
     // Wait for n1 to unblock
     assert(2 == n1.call());
     // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
     assert(current4 - current2 >= 1.seconds);
 
-    writefln("test07-5");
     // Now drop many messages
     n1.sleep(1.seconds, true);
     for (size_t i = 0; i < 500; i++)
@@ -1398,7 +1374,6 @@ unittest
     Thread.sleep(1.seconds);
     assert(3 == n1.call());
 
-    writefln("test07-6");
     // Debug output, uncomment if needed
     version (none)
     {
@@ -1408,10 +1383,11 @@ unittest
         writeln("Delta since sleep: ", current4 - current2);
     }
 
-    writefln("test07-7");
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
     writefln("test07");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // Filter commands
@@ -1500,19 +1476,19 @@ unittest
     assert(filtered.fooCount() == 1);
 
     // both of these work
-    static assert(is(typeof(filtered.filter!(API.foo))));
-    static assert(is(typeof(filtered.filter!(filtered.foo))));
+    static assert(is(typeof(filtered.ctrl.filter!(API.foo))));
+    static assert(is(typeof(filtered.ctrl.filter!(filtered.foo))));
 
     // only method in the overload set that takes a parameter,
     // should still match a call to filter with no parameters
-    static assert(is(typeof(filtered.filter!(filtered.bar))));
+    static assert(is(typeof(filtered.ctrl.filter!(filtered.bar))));
 
     // wrong parameters => fail to compile
-    static assert(!is(typeof(filtered.filter!(filtered.bar, float))));
+    static assert(!is(typeof(filtered.ctrl.filter!(filtered.bar, float))));
     // Only `API` overload sets are considered
-    static assert(!is(typeof(filtered.filter!(filtered.bar, string))));
+    static assert(!is(typeof(filtered.ctrl.filter!(filtered.bar, string))));
 
-    filtered.filter!(API.foo);
+    filtered.ctrl.filter!(API.foo);
 
     caller.callFoo();
     assert(filtered.fooCount() == 1);  // it was not called!
@@ -1527,7 +1503,7 @@ unittest
     assert(filtered.fooIntCount() == 1);  // first time called
 
     // now filter only the int overload
-    filtered.filter!(API.foo, int);
+    filtered.ctrl.filter!(API.foo, int);
 
     // make sure the parameterless overload is still not filtered
     caller.callFoo();
@@ -1549,9 +1525,12 @@ unittest
     caller.foo();
     caller.bar(1);
 
+
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
     writefln("test08");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // request timeouts (from main thread)
@@ -1592,6 +1571,8 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test09");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1637,6 +1618,8 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test10");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // request timeouts (foreign node to another node)
@@ -1679,6 +1662,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test11");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // test-case for zombie responses
@@ -1723,6 +1708,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test12");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // request timeouts with dropped messages
@@ -1758,9 +1745,12 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_transceiver = node_2.ctrl.transceiver;
     node_1.check();
+    Thread.sleep(1000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test13");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1803,6 +1793,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test14");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
 
 // Test explicit shutdown
@@ -1837,4 +1829,6 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
     writefln("test15");
+    ThreadScheduler.instance.writeThreadInfos();
+    //ThreadScheduler.instance.joinAll();
 }
