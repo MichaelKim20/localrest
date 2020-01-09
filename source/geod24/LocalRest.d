@@ -419,7 +419,7 @@ private class Server (API)
             {
                 thisScheduler.spawn(() {
                     handleRequest(req, node, control.filter);
-                });
+                }, 128*1024);
             }
 
             void handleRes (Response res)
@@ -436,72 +436,70 @@ private class Server (API)
                 thisWaitingManager = waitingManager;
                 thisThreadInfoEx = infoEx;
 
+                ThreadScheduler.instance.notify(cond);
+
                 bool terminate = false;
 
                 Message msg;
-                thisScheduler.spawn({
-                    while (!terminate)
+                while (!terminate)
+                {
+                    if (transceiver.tryReceive(&msg))
                     {
-                        if (transceiver.tryReceive(&msg))
+                        switch (msg.tag)
                         {
-                            switch (msg.tag)
-                            {
-                                case MessageType.request :
-                                    if (!isSleeping())
-                                        handleReq(msg.req);
-                                    else if (!control.drop)
-                                        await_req ~= msg.req;
-                                    break;
+                            case MessageType.request :
+                                if (!isSleeping())
+                                    handleReq(msg.req);
+                                else if (!control.drop)
+                                    await_req ~= msg.req;
+                                break;
 
-                                case MessageType.response :
-                                    auto cond = thisScheduler.newCondition(null);
-                                    foreach (_; 0..10)
-                                    {
-                                        if (thisWaitingManager.exist(msg.res.id))
-                                            break;
-                                        thisScheduler.wait(cond, 10.msecs);
-                                    }
-                                    if (!isSleeping())
-                                        handleRes(msg.res);
-                                    else if (!control.drop)
-                                        await_res ~= msg.res;
-                                    break;
+                            case MessageType.response :
+                                auto cond = thisScheduler.newCondition(null);
+                                foreach (_; 0..10)
+                                {
+                                    if (thisWaitingManager.exist(msg.res.id))
+                                        break;
+                                    thisScheduler.wait(cond, 10.msecs);
+                                }
+                                if (!isSleeping())
+                                    handleRes(msg.res);
+                                else if (!control.drop)
+                                    await_res ~= msg.res;
+                                break;
 
-                                case MessageType.filter :
-                                    control.filter = msg.filter;
-                                    break;
+                            case MessageType.filter :
+                                control.filter = msg.filter;
+                                break;
 
-                                case MessageType.time_command :
-                                    control.sleep_until = Clock.currTime + msg.time.dur;
-                                    control.drop = msg.time.drop;
-                                    break;
+                            case MessageType.time_command :
+                                control.sleep_until = Clock.currTime + msg.time.dur;
+                                control.drop = msg.time.drop;
+                                break;
 
-                                case MessageType.shutdown_command :
-                                    terminate = true;
-                                    break;
+                            case MessageType.shutdown_command :
+                                terminate = true;
+                                break;
 
-                                default :
-                                    assert(0, "Unexpected type: " ~ msg.tag);
-                            }
+                            default :
+                                assert(0, "Unexpected type: " ~ msg.tag);
                         }
-
-                        if (!isSleeping())
-                        {
-                            await_req.each!(req => handleReq(req));
-                            await_req.length = 0;
-                            assumeSafeAppend(await_req);
-
-                            await_res.each!(res => handleRes(res));
-                            await_res.length = 0;
-                            assumeSafeAppend(await_res);
-                        }
-
-                        thisScheduler.yield();
                     }
-                });
 
-                ThreadScheduler.instance.notify(cond);
-            });
+                    if (!isSleeping())
+                    {
+                        await_req.each!(req => handleReq(req));
+                        await_req.length = 0;
+                        assumeSafeAppend(await_req);
+
+                        await_res.each!(res => handleRes(res));
+                        await_res.length = 0;
+                        assumeSafeAppend(await_res);
+                    }
+
+                    thisScheduler.yield();
+                }
+            }, 24*1024*1024);
         });
 
         //  Wait for the node to be created.
@@ -638,7 +636,7 @@ private class Client
             thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
-            });
+            }, 128*1024);
 
             this._terminate = false;
             auto c = thisScheduler.newCondition(null);
@@ -662,12 +660,12 @@ private class Client
                     this._waitingManager.waiting[msg.res.id].c.notify();
                     this._waitingManager.remove(msg.res.id);
                 }
-            });
+            }, 128*1024);
 
             thisScheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
-            });
+            }, 128*1024);
         }
 
         return res;

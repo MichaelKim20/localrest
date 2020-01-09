@@ -173,7 +173,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void start (void delegate() op, size_t sz=STACK_SIZE);
+    void start (void delegate() op, size_t sz=0);
 
 
     /***************************************************************************
@@ -198,7 +198,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void spawn (void delegate() op, size_t sz=STACK_SIZE);
+    void spawn (void delegate() op, size_t sz=0);
 
 
     /***************************************************************************
@@ -749,7 +749,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    public void start (void delegate () op, size_t sz=STACK_SIZE)
+    public void start (void delegate () op, size_t sz=0)
     {
         create(op, sz);
         dispatch();
@@ -776,7 +776,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    public void spawn (void delegate() op, size_t sz=STACK_SIZE) nothrow
+    public void spawn (void delegate() op, size_t sz=0) nothrow
     {
         create(op, sz);
         yield();
@@ -972,7 +972,10 @@ class FiberScheduler : Scheduler, InfoObject
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap, sz);  // 16Mb
+        if (sz == 0)
+            m_fibers ~= new InfoFiber(&wrap);
+        else
+            m_fibers ~= new InfoFiber(&wrap, sz);
     }
 
 
