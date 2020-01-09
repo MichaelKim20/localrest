@@ -50,12 +50,6 @@ import core.thread;
 
 import std.stdio;
 
-
-public interface InfoObject
-{
-    void cleanup (bool root);
-}
-
 /*******************************************************************************
 
     Encapsulates all implementation-level data needed for scheduling.
@@ -108,10 +102,22 @@ public struct ThreadInfo
     }
 }
 
+/// Types of Objects You Can Add to ThreadInfo.objectValues
+public interface InfoObject
+{
+    /// Cleans up this when a thread terminates.
+    void cleanup (bool root);
+}
+
+/// Information of a Current Thread or Fiber
 public @property ref ThreadInfo thisInfo () nothrow
 {
     return ThreadInfo.thisInfo;
 }
+
+/// Size of stack required when Fiber runs (default size)
+const STACK_SIZE = 16 * 1024 * 1024;
+
 
 /*******************************************************************************
 
@@ -167,7 +173,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void start (void delegate() op);
+    void start (void delegate() op, size_t sz=STACK_SIZE);
 
 
     /***************************************************************************
@@ -192,7 +198,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void spawn (void delegate() op);
+    void spawn (void delegate() op, size_t sz=STACK_SIZE);
 
 
     /***************************************************************************
@@ -298,7 +304,6 @@ interface Scheduler
     void notifyAll (Condition c);
 }
 
-
 /*******************************************************************************
 
     An example Scheduler using kernel threads.
@@ -310,7 +315,7 @@ interface Scheduler
 
 *******************************************************************************/
 
-public class ThreadScheduler : Scheduler, InfoObject
+public class ThreadScheduler : Scheduler
 {
     /// For Condition
     private Mutex mutex;
@@ -324,7 +329,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    @property static instance ()
+    public @property static instance ()
     {
         if (scheduler is null)
             scheduler = new ThreadScheduler();
@@ -338,7 +343,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (void delegate () op)
+    public void start (void delegate () op, size_t sz = 0)
     {
         op();
     }
@@ -350,7 +355,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void stop ()
+    public void stop ()
     {
 
     }
@@ -362,11 +367,12 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (void delegate () op)
+    public void spawn (void delegate () op, size_t sz = 0)
     {
         auto t = new Thread({
             scope (exit) {
                 thisInfo.cleanup(true);
+                remove(Thread.getThis());
                 removeInfo(Thread.getThis());
             }
             addInfo(Thread.getThis(), thisInfo);
@@ -374,6 +380,10 @@ public class ThreadScheduler : Scheduler, InfoObject
             op();
         });
         t.start();
+        synchronized( this )
+        {
+            m_all[t] = t;
+        }
     }
 
 
@@ -383,7 +393,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void yield () nothrow
+    public void yield () nothrow
     {
         // no explicit yield needed
     }
@@ -396,7 +406,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    @property ref ThreadInfo thisInfo () nothrow
+    public @property ref ThreadInfo thisInfo () nothrow
     {
         return ThreadInfo.thisInfo;
     }
@@ -408,7 +418,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    Condition newCondition (Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         if (m is null)
         {
@@ -431,7 +441,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void wait (Condition c)
+    public void wait (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -456,7 +466,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    bool wait (Condition c, Duration period)
+    public bool wait (Condition c, Duration period)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -479,7 +489,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notify (Condition c)
+    public void notify (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -502,7 +512,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notifyAll (Condition c)
+    public void notifyAll (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -514,12 +524,22 @@ public class ThreadScheduler : Scheduler, InfoObject
         c.notifyAll();
     }
 
-    public void cleanup (bool root)
-    {
-        stop();
-    }
-
+    /// Storing information of threads. The key is `Thread`
+    /// and the value is `ThreadInfo`.
     private ThreadInfo[Thread]  threadInfos;
+
+    /***************************************************************************
+
+        Add information of threads.
+
+        Params:
+            t = The thread to add.
+            info = The infomation of thread to add.
+
+        In:
+            t must not be null.
+
+    ***************************************************************************/
 
     public final void addInfo (Thread t, ref ThreadInfo info)
     in
@@ -534,6 +554,18 @@ public class ThreadScheduler : Scheduler, InfoObject
         }
     }
 
+    /***************************************************************************
+
+        Remove information of threads.
+
+        Params:
+            t = The thread to remove.
+
+        In:
+            t must not be null.
+
+    ***************************************************************************/
+
     public final void removeInfo ( Thread t )
     in
     {
@@ -547,14 +579,119 @@ public class ThreadScheduler : Scheduler, InfoObject
         }
     }
 
-    public final void joinAll( bool rethrow = true )
+    private Thread[Thread]  m_all;
+
+    /***************************************************************************
+
+        Add t to the list of tracked threads if it is not already being tracked.
+
+        Params:
+            t = The thread to add.
+
+        In:
+            t must not be null.
+
+    ***************************************************************************/
+
+    final void add( Thread t )
+    in
+    {
+        assert( t );
+    }
+    do
     {
         synchronized( this )
         {
-            foreach (Thread t; this.threadInfos.keys)
-                t.join( rethrow );
+            m_all[t] = t;
         }
     }
+
+
+    /***************************************************************************
+
+        Removes t from the list of tracked threads.  No operation will be
+        performed if t is not currently being tracked by this object.
+
+        Params:
+            t = The thread to remove.
+
+        In:
+            t must not be null.
+
+    ***************************************************************************/
+
+    final void remove( Thread t )
+    in
+    {
+        assert( t );
+    }
+    do
+    {
+        synchronized( this )
+        {
+            m_all.remove( t );
+        }
+    }
+
+    /***************************************************************************
+
+        Operates on all threads currently tracked by this object.
+
+    ***************************************************************************/
+
+    final int opApply( scope int delegate( ref Thread ) dg )
+    {
+        synchronized( this )
+        {
+            int ret = 0;
+
+            // NOTE: This loop relies on the knowledge that m_all uses the
+            //       Thread object for both the key and the mapped value.
+            foreach ( Thread t; m_all.keys )
+            {
+                ret = dg( t );
+                if ( ret )
+                    break;
+            }
+            return ret;
+        }
+    }
+
+
+    /***************************************************************************
+
+        Iteratively joins all tracked threads.  This function will block add,
+        remove, and opApply until it completes.
+
+        Params:
+            rethrow = Rethrow any unhandled exception which may have caused the
+                      current thread to terminate.
+
+        Throws:
+            Any exception not handled by the joined threads.
+
+    ***************************************************************************/
+
+    final void joinAll( bool rethrow = true )
+    {
+        synchronized( this )
+        {
+            // NOTE: This loop relies on the knowledge that m_all uses the
+            //       Thread object for both the key and the mapped value.
+            foreach ( Thread t; m_all.keys )
+            {
+                t.join( rethrow );
+            }
+        }
+    }
+
+    /***************************************************************************
+
+        Clean all `InfoObjects` in use from all running threads
+        (include main thread).
+        As a result, the thread is safely terminated.
+
+    ***************************************************************************/
 
     public void cleanupAllThread ()
     {
@@ -568,16 +705,31 @@ public class ThreadScheduler : Scheduler, InfoObject
 }
 
 
+/*******************************************************************************
+
+    Iteratively joins all tracked threads.  This function will block add,
+    remove, and opApply until it completes.
+
+*******************************************************************************/
+
 public void joinAllThread ()
 {
     ThreadScheduler.instance.joinAll();
 }
 
 
+/*******************************************************************************
+
+    Clean all `InfoObjects` in use from all running threads(include main thread).
+    As a result, the thread is safely terminated.
+
+*******************************************************************************/
+
 public void cleanupAllThread ()
 {
     ThreadScheduler.instance.cleanupAllThread();
 }
+
 
 /*******************************************************************************
 
@@ -600,9 +752,9 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (void delegate () op)
+    public void start (void delegate () op, size_t sz=STACK_SIZE)
     {
-        create(op);
+        create(op, sz);
         dispatch();
     }
 
@@ -613,7 +765,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void stop ()
+    public void stop ()
     {
         terminated = true;
         terminated_time = MonoTime.currTime;
@@ -627,9 +779,9 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (void delegate() op) nothrow
+    public void spawn (void delegate() op, size_t sz=STACK_SIZE) nothrow
     {
-        create(op);
+        create(op, sz);
         yield();
     }
 
@@ -641,7 +793,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void yield () nothrow
+    public void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -661,7 +813,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    @property ref ThreadInfo thisInfo () nothrow
+    public @property ref ThreadInfo thisInfo () nothrow
     {
         auto f = cast(InfoFiber) Fiber.getThis();
 
@@ -677,11 +829,18 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    Condition newCondition (Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         return new FiberCondition(m);
     }
 
+    /***************************************************************************
+
+        Cleans up this FiberScheduler.
+
+        This must be called when a thread terminates.
+
+    ***************************************************************************/
 
     public void cleanup (bool root)
     {
@@ -703,7 +862,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void wait (Condition c)
+    public void wait (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -728,7 +887,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    bool wait (Condition c, Duration period)
+    public bool wait (Condition c, Duration period)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -774,7 +933,7 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notifyAll (Condition c)
+    public void notifyAll (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -786,9 +945,6 @@ class FiberScheduler : Scheduler, InfoObject
         c.notifyAll();
     }
 
-protected:
-
-
     /***************************************************************************
 
         Creates a new Fiber which calls the given delegate.
@@ -798,7 +954,7 @@ protected:
 
     ***************************************************************************/
 
-    void create (void delegate() op) nothrow
+    protected void create (void delegate() op, size_t sz) nothrow
     {
         auto owner_scheduler = this;
         auto owner_objects = thisInfo.objectValues;
@@ -819,7 +975,7 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap, 16 * 1024 * 1024);  // 16Mb
+        m_fibers ~= new InfoFiber(&wrap, sz);  // 16Mb
     }
 
 
@@ -844,10 +1000,10 @@ protected:
         }
     }
 
-private:
-    class FiberCondition : Condition
+
+    private class FiberCondition : Condition
     {
-        this (Mutex m) nothrow
+        public this (Mutex m) nothrow
         {
             super(m);
             notified = false;
@@ -859,7 +1015,7 @@ private:
 
         ***********************************************************************/
 
-        override void wait () nothrow
+        public override void wait () nothrow
         {
             scope (exit) notified = false;
 
@@ -878,7 +1034,7 @@ private:
 
         ***********************************************************************/
 
-        override bool wait (Duration period) nothrow
+        public override bool wait (Duration period) nothrow
         {
             import core.time : MonoTime;
 
@@ -901,7 +1057,7 @@ private:
 
         ***********************************************************************/
 
-        override void notify () nothrow
+        public override void notify () nothrow
         {
             notified = true;
             switchContext();
@@ -914,14 +1070,13 @@ private:
 
         ***********************************************************************/
 
-        override void notifyAll () nothrow
+        public override void notifyAll () nothrow
         {
             notified = true;
             switchContext();
         }
 
-    private:
-        void switchContext() nothrow
+        private void switchContext() nothrow
         {
             if (mutex_nothrow) mutex_nothrow.unlock_nothrow();
             scope (exit)
@@ -933,9 +1088,7 @@ private:
         private bool notified;
     }
 
-private:
-
-    void dispatch ()
+    private void dispatch ()
     {
         import std.algorithm.mutation : remove;
         while (m_fibers.length > 0)
@@ -960,9 +1113,8 @@ private:
         }
     }
 
-private:
-    Fiber[] m_fibers;
-    size_t m_pos;
+    private Fiber[] m_fibers;
+    private size_t m_pos;
 }
 
 
@@ -1331,7 +1483,7 @@ private struct ChannelContext (T)
     //  Waiting Condition
     public Condition condition;
 }
-
+/*
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1557,3 +1709,4 @@ unittest
 
     cleanupAllThread();
 }
+*/

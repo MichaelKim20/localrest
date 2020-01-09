@@ -1006,7 +1006,7 @@ public class RemoteAPI (API) : API
 
 
 import std.stdio;
-
+/*
 /// Simple usage example
 unittest
 {
@@ -1133,7 +1133,7 @@ unittest
 
     cleanupAllThread();
 }
-
+*/
 /// This network have different types of nodes in it
 unittest
 {
@@ -1224,7 +1224,7 @@ unittest
 
     cleanupAllThread();
 }
-
+/*
 /// Support for circular nodes call
 unittest
 {
@@ -1900,3 +1900,4 @@ unittest
 
     cleanupAllThread();
 }
+*/
