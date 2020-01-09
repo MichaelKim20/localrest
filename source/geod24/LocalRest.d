@@ -499,7 +499,7 @@ private class Server (API)
 
                     thisScheduler.yield();
                 }
-            }, 24*1024*1024);
+            }, 8*1024*1024);
         });
 
         //  Wait for the node to be created.
@@ -1001,7 +1001,6 @@ public class RemoteAPI (API) : API
             });
         }
 }
-
 
 import std.stdio;
 

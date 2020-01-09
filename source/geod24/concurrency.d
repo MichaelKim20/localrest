@@ -312,7 +312,7 @@ interface Scheduler
 
 *******************************************************************************/
 
-public class ThreadScheduler : Scheduler
+public class ThreadScheduler : Scheduler, InfoObject
 {
     /// For Condition
     private Mutex mutex;
@@ -516,6 +516,19 @@ public class ThreadScheduler : Scheduler
                 c.mutex.unlock();
 
         c.notifyAll();
+    }
+
+
+    /***************************************************************************
+
+        Cleans up this FiberScheduler.
+
+        This must be called when a thread terminates.
+
+    ***************************************************************************/
+
+    public void cleanup (bool root)
+    {
     }
 
     /// Storing information of threads. The key is `Thread`
@@ -1479,7 +1492,7 @@ private struct ChannelContext (T)
     //  Waiting Condition
     public Condition condition;
 }
-/*
+
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1705,4 +1718,3 @@ unittest
 
     cleanupAllThread();
 }
-*/
