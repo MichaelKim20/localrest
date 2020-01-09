@@ -519,7 +519,7 @@ public class ThreadScheduler : Scheduler, InfoObject
         stop();
     }
 
-    private ThreadInfo[Thread]  m_threadInfos;
+    private ThreadInfo[Thread]  threadInfos;
 
     public final void addInfo (Thread t, ref ThreadInfo info)
     in
@@ -530,7 +530,7 @@ public class ThreadScheduler : Scheduler, InfoObject
     {
         synchronized( this )
         {
-            m_threadInfos[t] = info;
+            this.threadInfos[t] = info;
         }
     }
 
@@ -543,7 +543,7 @@ public class ThreadScheduler : Scheduler, InfoObject
     {
         synchronized(this)
         {
-            m_threadInfos.remove(t);
+            this.threadInfos.remove(t);
         }
     }
 
@@ -551,7 +551,7 @@ public class ThreadScheduler : Scheduler, InfoObject
     {
         synchronized( this )
         {
-            foreach ( Thread t; m_threadInfos.keys )
+            foreach (Thread t; this.threadInfos.keys)
                 t.join( rethrow );
         }
     }
@@ -560,7 +560,7 @@ public class ThreadScheduler : Scheduler, InfoObject
     {
         synchronized(this)
         {
-            foreach (ref treadInfo; this.m_threadInfos)
+            foreach (ref treadInfo; this.threadInfos)
                 treadInfo.cleanup(true);
         }
         thisInfo.cleanup(true);
@@ -819,7 +819,7 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap);
+        m_fibers ~= new InfoFiber(&wrap, 16 * 1024 * 1024);  // 16Mb
     }
 
 

@@ -1186,27 +1186,35 @@ unittest
         private API master;
         private ulong requests_;
     }
+    writefln("test03, 1");
 
     RemoteAPI!API[4] nodes;
     auto master = RemoteAPI!API.spawn!MasterNode();
     nodes[0] = master;
+    writefln("test03, 2");
     nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    writefln("test03, 3");
     nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    writefln("test03, 4");
     nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    writefln("test03, 5");
 
     foreach (n; nodes)
     {
         assert(n.requests() == 0);
         assert(n.value() == 42);
     }
+    writefln("test03, 6");
 
     assert(nodes[0].requests() == 4);
+    writefln("test03, 7");
 
     foreach (n; nodes[1 .. $])
     {
         assert(n.value() == 42);
         assert(n.requests() == 2);
     }
+    writefln("test03, 8");
 
     assert(nodes[0].requests() == 7);
 
