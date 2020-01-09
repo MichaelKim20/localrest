@@ -116,7 +116,7 @@ public @property ref ThreadInfo thisInfo () nothrow
 }
 
 /// Size of stack required when Fiber runs (default size)
-const STACK_SIZE = 16 * 1024 * 1024;
+const STACK_SIZE = 2 * 1024 * 1024;
 
 
 /*******************************************************************************
@@ -375,15 +375,12 @@ public class ThreadScheduler : Scheduler
                 remove(Thread.getThis());
                 removeInfo(Thread.getThis());
             }
+            add(Thread.getThis());
             addInfo(Thread.getThis(), thisInfo);
             thisScheduler = new FiberScheduler();
             op();
         });
         t.start();
-        synchronized( this )
-        {
-            m_all[t] = t;
-        }
     }
 
 
