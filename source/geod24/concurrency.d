@@ -115,9 +115,6 @@ public @property ref ThreadInfo thisInfo () nothrow
     return ThreadInfo.thisInfo;
 }
 
-/// Size of stack required when Fiber runs (default size)
-const STACK_SIZE = 2 * 1024 * 1024;
-
 
 /*******************************************************************************
 
@@ -985,23 +982,23 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    static class InfoFiber : Fiber
+    static public class InfoFiber : Fiber
     {
         ThreadInfo info;
 
-        this (void delegate () op) nothrow
+        public this (void delegate () op) nothrow
         {
             super(op);
         }
 
-        this (void delegate () op, size_t sz) nothrow
+        public this (void delegate () op, size_t sz) nothrow
         {
             super (op, sz);
         }
     }
 
 
-    private class FiberCondition : Condition
+    public class FiberCondition : Condition
     {
         public this (Mutex m) nothrow
         {
@@ -1251,7 +1248,6 @@ public class Channel (T)
             return true;
         }
 
-        //if ((this.qsize == 0) || (this.queue[].walkLength < this.qsize))
         if (this.queue[].walkLength < this.qsize)
         {
             this.queue.insertBack(msg);
