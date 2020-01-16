@@ -91,6 +91,9 @@ import core.sync.mutex;
 import core.thread;
 import core.time;
 
+import std.stdio;
+
+
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
 private struct ArgWrapper (T...)
@@ -266,12 +269,54 @@ public @property void thisThreadInfoEx (ThreadInfoEx value) nothrow
 
 /*******************************************************************************
 
-    Receive requests, To obtain and return results by passing
-    them to an instance of the Node.
+    Provide eventloop-like functionalities
+
+    Since nodes instantiated via this modules are Vibe.d server,
+    they expect the ability to run an asynchronous task ,
+    usually provided by `vibe.core.core : runTask`.
+
+    In order for them to properly work, we need to integrate them to our event
+    loop by providing the ability to spawn a task, and wait on some condition,
+    optionally with a timeout.
+
+    The following functions do that.
+    Note that those facilities are not available from the main thread,
+    while is supposed to do tests and doesn't have a scheduler.
 
 *******************************************************************************/
 
-private class Server (API)
+public void runTask (void delegate() dg)
+{
+    assert(thisScheduler !is null, "Cannot call this function from the main thread");
+    thisScheduler.spawn(dg);
+}
+
+
+/// Ditto
+public void sleep (Duration timeout)
+{
+    assert(thisScheduler !is null, "Cannot call this function from the main thread");
+    scope c = thisScheduler.newCondition(null);
+    thisScheduler.wait(c, timeout);
+}
+
+
+/*******************************************************************************
+
+    A reference to an alread-instantiated node
+
+    This class serves the same purpose as a `RestInterfaceClient`:
+    it is a client for an already instantiated rest `API` interface.
+
+    In order to instantiate a new server (in a remote thread), use the static
+    `spawn` function.
+
+    Params:
+      API = The interface defining the API to implement
+
+*******************************************************************************/
+
+public class RemoteAPI (API) : API
 {
     /***************************************************************************
 
@@ -285,26 +330,26 @@ private class Server (API)
         per "address".
 
         Note:
-            When the `Server` returned by this function is finalized,
-            the child thread will be shut down.
-            This ownership mechanism should be replaced with reference counting
-            in a later version.
+          When the `RemoteAPI` returned by this function is finalized,
+          the child thread will be shut down.
+          This ownership mechanism should be replaced with reference counting
+          in a later version.
 
         Params:
-            Impl = Type of the implementation to instantiate
-            args = Arguments to the object's constructor
+          Impl = Type of the implementation to instantiate
+          args = Arguments to the object's constructor
+          timeout = (optional) timeout to use with requests
 
         Returns:
-            A `Server` owning the node reference
+          A `RemoteAPI` owning the node reference
 
     ***************************************************************************/
 
-    public static Server!API spawn (Impl) (CtorParams!Impl args)
+    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
+        Duration timeout = Duration.init)
     {
-        auto transceiver = spawned!Impl(args);
-        return new Server(transceiver);
+        return new RemoteAPI(spawned!Impl(args), timeout);
     }
-
 
     /***************************************************************************
 
@@ -392,7 +437,6 @@ private class Server (API)
         import std.range;
 
         Transceiver transceiver;
-        Implementation node;
 
         // used for controling filtering / sleep
         struct Control
@@ -407,22 +451,26 @@ private class Server (API)
 
         auto thread_scheduler = new ThreadScheduler();
         thread_scheduler.spawn({
-            thisScheduler.start({
-                node = new Implementation(cargs);
-                thisTransceiver = new Transceiver();
-                thisWaitingManager = new WaitingManager();
-                thisThreadInfoEx = new ThreadInfoEx(true);
-                transceiver = thisTransceiver;
 
-                Request[] await_req;
-                Response[] await_res;
-                Request[] await_drop_req;
+            Message msg;
+            auto node = new Implementation(cargs);
+            auto ts = new Transceiver();
+            auto wm = new WaitingManager();
+            auto ie = new ThreadInfoEx(true);
+            Control control;
+            Request[] await_req;
+            Response[] await_res;
+            Request[] await_drop_req;
+            bool terminate = false;
+            auto mutex = new Mutex;
+
+            thisScheduler.start({
+                thisTransceiver = ts;
+                thisWaitingManager = wm;
+                thisThreadInfoEx = ie;
+                transceiver = ts;
 
                 started = true;
-
-                bool terminate = false;
-
-                Control control;
 
                 bool isSleeping ()
                 {
@@ -451,10 +499,9 @@ private class Server (API)
                     thisWaitingManager.remove(res.id);
                 }
 
-                Message msg;
-
                 while (!terminate)
                 {
+
                     if (thisTransceiver.tryReceive(&msg))
                     {
                         switch (msg.tag)
@@ -469,14 +516,13 @@ private class Server (API)
                                 break;
 
                             case MessageType.response :
-                                scope c = thisScheduler.newCondition(null);
+                                auto c = thisScheduler.newCondition(null);
                                 foreach (_; 0..10)
                                 {
                                     if (thisWaitingManager.exist(msg.res.id))
                                         break;
                                     thisScheduler.wait(c, 10.msecs);
                                 }
-
                                 if (!isSleeping())
                                     handleRes(msg.res);
                                 else if (!control.drop)
@@ -501,9 +547,7 @@ private class Server (API)
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
                     }
-
-                    if (thisScheduler !is null)
-                        thisScheduler.yield();
+                    thisScheduler.yield();
 
                     if (!isSleeping())
                     {
@@ -529,10 +573,9 @@ private class Server (API)
                         }
                     }
 
-                    if (thisScheduler !is null)
-                        thisScheduler.yield();
+                    thisScheduler.yield();
                 }
-            });
+            }, 16 * 1024 * 1024);
         });
 
         //  Wait for the node to be created.
@@ -542,232 +585,9 @@ private class Server (API)
         return transceiver;
     }
 
-    /// Devices that can receive requests.
+    /// A device that can requests.
     private Transceiver _transceiver;
 
-
-    /***************************************************************************
-
-        Create an instante of a `Server`
-
-        Params:
-            transceiver = This is an instance of `Transceiver` and
-                a device that can receive requests.
-
-    ***************************************************************************/
-
-    public this (Transceiver transceiver) @nogc pure nothrow
-    {
-        this._transceiver = transceiver;
-    }
-
-
-    /***************************************************************************
-
-        Returns the `Transceiver`
-
-        This can be useful for calling `geod24.concurrency.register` or similar.
-        Note that the `Transceiver` should not be used directly,
-        as our event loop, would error out on an unknown message.
-
-    ***************************************************************************/
-
-    @property public Transceiver transceiver () @safe nothrow
-    {
-        return this._transceiver;
-    }
-
-
-    /***************************************************************************
-
-        Send an async message to the thread to immediately shut down.
-
-    ***************************************************************************/
-
-    public void shutdown () @trusted
-    {
-        this._transceiver.send(ShutdownCommand());
-        this._transceiver.close();
-    }
-}
-
-
-/*******************************************************************************
-
-    Request to the `Server`, receive a response
-
-*******************************************************************************/
-
-private class Client
-{
-    /// Timeout to use when issuing requests
-    private Duration _timeout;
-
-    /// Ctor
-    public this (Duration timeout = Duration.init) @safe nothrow
-    {
-        this._timeout = timeout;
-    }
-    /***************************************************************************
-
-        This enables appropriate responses to requests through the API
-
-        Params:
-           remote = Instance of Transceiver
-           req = `Request`
-           res = `Response`
-
-    ***************************************************************************/
-
-    public Response router (Transceiver remote, string method, string args) @trusted
-    {
-        Request req;
-        Response res;
-
-        // from Node to Node
-        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
-        {
-            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
-            remote.send(req);
-
-            res = thisWaitingManager.waitResponse(req.id, this._timeout);
-        }
-
-        // from Non-Node to Node
-        else
-        {
-            if (thisScheduler is null)
-                thisScheduler = new FiberScheduler();
-
-            if (thisWaitingManager is null)
-                thisWaitingManager = new WaitingManager();
-
-            if (thisTransceiver is null)
-                thisTransceiver = new Transceiver();
-
-
-            bool terminated = false;
-            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
-
-            thisScheduler.spawn({
-                remote.send(req);
-            });
-
-            thisScheduler.spawn({
-                Message msg;
-                while (!terminated)
-                {
-                    if (thisTransceiver.tryReceive(&msg))
-                    {
-                        scope c = thisScheduler.newCondition(null);
-                        foreach (_; 0..10)
-                        {
-                            if (thisWaitingManager.exist(msg.res.id))
-                                break;
-                            thisScheduler.wait(c, 1.msecs);
-                        }
-                        thisWaitingManager.pending = msg.res;
-                        thisWaitingManager.waiting[msg.res.id].c.notify();
-                        if (msg.res.id == req.id)
-                            break;
-                    }
-                    thisScheduler.yield();
-                }
-            });
-
-            thisScheduler.start({
-                res = thisWaitingManager.waitResponse(req.id, this._timeout);
-                terminated = true;
-            });
-
-        }
-
-        return res;
-    }
-
-}
-
-/*******************************************************************************
-
-    Provide eventloop-like functionalities
-
-    Since nodes instantiated via this modules are Vibe.d server,
-    they expect the ability to run an asynchronous task ,
-    usually provided by `vibe.core.core : runTask`.
-
-    In order for them to properly work, we need to integrate them to our event
-    loop by providing the ability to spawn a task, and wait on some condition,
-    optionally with a timeout.
-
-    The following functions do that.
-    Note that those facilities are not available from the main thread,
-    while is supposed to do tests and doesn't have a scheduler.
-
-*******************************************************************************/
-
-public void runTask (void delegate() dg)
-{
-    assert(thisScheduler !is null, "Cannot call this function from the main thread");
-    thisScheduler.spawn(dg);
-}
-
-
-/// Ditto
-public void sleep (Duration timeout)
-{
-    assert(thisScheduler !is null, "Cannot call this function from the main thread");
-    scope c = thisScheduler.newCondition(null);
-    thisScheduler.wait(c, timeout);
-}
-
-
-/*******************************************************************************
-
-    It has one `Server` and one `Client`. make a new thread It uses `Server`.
-
-*******************************************************************************/
-
-public class RemoteAPI (API) : API
-{
-    /***************************************************************************
-
-        Instantiate a node and start it
-
-        This is usually called from the main thread, which will start all the
-        nodes and then start to process request.
-        In order to have a connected network, no nodes in any thread should have
-        a different reference to the same node.
-        In practice, this means there should only be one `Transceiver`
-        per "address".
-
-        Note:
-          When the `RemoteAPI` returned by this function is finalized,
-          the child thread will be shut down.
-          This ownership mechanism should be replaced with reference counting
-          in a later version.
-
-        Params:
-          Impl = Type of the implementation to instantiate
-          args = Arguments to the object's constructor
-          timeout = (optional) timeout to use with requests
-
-        Returns:
-          A `RemoteAPI` owning the node reference
-
-    ***************************************************************************/
-
-    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
-        Duration timeout = Duration.init)
-    {
-        auto server = Server!API.spawn!Impl(args);
-        return new RemoteAPI(server.transceiver, timeout);
-    }
-
-    /// A device that can requests.
-    private Transceiver _server_transceiver;
-
-    /// Request to the `Server`, receive a response
-    private Client _client;
 
     /// Timeout to use when issuing requests
     private Duration _timeout;
@@ -790,11 +610,10 @@ public class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (Transceiver transceiver, Duration timeout = Duration.init) @safe nothrow
+    public this (Transceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this._server_transceiver = transceiver;
+        this._transceiver = transceiver;
         this._timeout = timeout;
-        this._client = new Client(timeout);
     }
 
 
@@ -823,7 +642,7 @@ public class RemoteAPI (API) : API
 
         @property public Transceiver transceiver () @safe nothrow
         {
-            return this._server_transceiver;
+            return this._transceiver;
         }
 
 
@@ -835,10 +654,10 @@ public class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            if (this._server_transceiver)
+            if (this._transceiver)
             {
-                this._server_transceiver.send(ShutdownCommand());
-                this._server_transceiver.close();
+                this._transceiver.send(ShutdownCommand());
+                this._transceiver.close();
             }
         }
 
@@ -862,7 +681,7 @@ public class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool drop = false, bool send_response_msg = true) @trusted
         {
-            this._server_transceiver.send(TimeCommand(d, drop, send_response_msg));
+            this._transceiver.send(TimeCommand(d, drop, send_response_msg));
         }
 
 
@@ -944,7 +763,7 @@ public class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            this._server_transceiver.send(FilterAPI(mangled, pretty));
+            this._transceiver.send(FilterAPI(mangled, pretty));
         }
 
 
@@ -956,7 +775,7 @@ public class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            this._server_transceiver.send(FilterAPI(""));
+            this._transceiver.send(FilterAPI(""));
         }
     }
 
@@ -969,7 +788,71 @@ public class RemoteAPI (API) : API
                     auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                         .serializeToJsonString();
 
-                    auto res = this._client.router(this._server_transceiver, ovrld.mangleof, serialized);
+                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
+                    // this overload needs to be
+
+                    auto res = (Transceiver remote, string method, string args) @trusted
+                    {
+                        Request req;
+                        Response res;
+
+                        // from Node to Node
+                        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
+                        {
+                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
+                            remote.send(req);
+
+                            res = thisWaitingManager.waitResponse(req.id, this._timeout);
+                        }
+
+                        // from Non-Node to Node
+                        else
+                        {
+                            if (thisScheduler is null)
+                                thisScheduler = new FiberScheduler();
+
+                            if (thisWaitingManager is null)
+                                thisWaitingManager = new WaitingManager();
+
+                            if (thisTransceiver is null)
+                                thisTransceiver = new Transceiver();
+
+                            bool terminated = false;
+                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
+
+                            thisScheduler.spawn({
+                                remote.send(req);
+                            });
+
+                            thisScheduler.spawn({
+                                Message msg;
+                                while (!terminated)
+                                {
+                                    if (thisTransceiver.tryReceive(&msg))
+                                    {
+                                        scope c = thisScheduler.newCondition(null);
+                                        foreach (_; 0..10)
+                                        {
+                                            if (thisWaitingManager.exist(msg.res.id))
+                                                break;
+                                            thisScheduler.wait(c, 1.msecs);
+                                        }
+                                        thisWaitingManager.pending = msg.res;
+                                        thisWaitingManager.waiting[msg.res.id].c.notify();
+                                        if (msg.res.id == req.id)
+                                            break;
+                                    }
+                                    thisScheduler.yield();
+                                }
+                            });
+
+                            thisScheduler.start({
+                                res = thisWaitingManager.waitResponse(req.id, this._timeout);
+                                terminated = true;
+                            });
+                        }
+                        return res;
+                    } (this._transceiver, ovrld.mangleof, serialized);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -983,10 +866,11 @@ public class RemoteAPI (API) : API
             });
         }
 }
-
+/*
 /// Simple usage example
 unittest
 {
+    writefln("test01, B");
     static interface API
     {
         @safe:
@@ -1015,11 +899,13 @@ unittest
     test.ctrl.shutdown();
 
     cleanupMainThread();
+    writefln("test01");
 }
 
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
+    writefln("test02, B");
     import std.conv;
     import geod24.concurrency;
     import geod24.Registry;
@@ -1111,11 +997,13 @@ unittest
     node2.ctrl.shutdown();
 
     cleanupMainThread();
+    writefln("test02");
 }
 
 /// This network have different types of nodes in it
 unittest
 {
+    writefln("test03, B");
     import geod24.concurrency;
 
     static interface API
@@ -1172,31 +1060,39 @@ unittest
     nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
     nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
 
+    writefln("test03 1");
     foreach (n; nodes)
     {
         assert(n.requests() == 0);
         assert(n.value() == 42);
     }
 
+    writefln("test03 2");
     assert(nodes[0].requests() == 4);
 
+    writefln("test03 3");
     foreach (n; nodes[1 .. $])
     {
         assert(n.value() == 42);
         assert(n.requests() == 2);
     }
 
+    writefln("test03 4");
     assert(nodes[0].requests() == 7);
 
+    writefln("test03 5");
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
 
+    writefln("test03 6");
     cleanupMainThread();
+    writefln("test03");
 }
 
 /// Support for circular nodes call
 unittest
 {
+    writefln("test04, B");
     import geod24.concurrency;
     import std.format;
 
@@ -1246,11 +1142,13 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
 
     cleanupMainThread();
+    writefln("test04");
 }
-
+*/
 /// Nodes can start tasks
 unittest
 {
+    writefln("test05, B");
     import core.thread;
     import core.time;
 
@@ -1293,27 +1191,37 @@ unittest
         private bool terminate;
     }
 
+    writefln("test05, B 1");
     import std.format;
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
+    writefln("test05, B 2");
     assert(node.getCounter() == 1);
+    writefln("test05, B 3");
     assert(node.getCounter() == 0);
+    writefln("test05, B 4");
     core.thread.Thread.sleep(1.seconds);
+    writefln("test05, B 5");
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
+    writefln("test05, B 6");
     assert(node.getCounter() == 0);
+    writefln("test05, B 7");
     node.stop();
     core.thread.Thread.sleep(100.msecs);
     node.ctrl.shutdown();
+    writefln("test05");
 
     cleanupMainThread();
 }
 
+/*
 // Sane name insurance policy
 unittest
 {
+    writefln("test06, B");
     import geod24.Transceiver;
 
     static interface API
@@ -1336,6 +1244,7 @@ unittest
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
+    writefln("test06");
 
     cleanupMainThread();
 }
@@ -1343,6 +1252,7 @@ unittest
 // Simulate temporary outage
 unittest
 {
+    writefln("test07, B");
     __gshared Transceiver n1transceive;
 
     static interface API
@@ -1369,6 +1279,7 @@ unittest
     n1transceive = n1.ctrl.transceiver;
     auto n2 = RemoteAPI!API.spawn!Node();
 
+    writefln("test07, 1");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
     assert(1 == n1.call());
@@ -1376,6 +1287,7 @@ unittest
     auto current2 = MonoTime.currTime();
     assert(current2 - current1 < 200.msecs);
 
+    writefln("test07, 2");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1384,20 +1296,23 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
+    writefln("test07, 3");
     // Wait for n1 to unblock
     assert(2 == n1.call());
     // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
     assert(current4 - current2 >= 1.seconds);
 
+    writefln("test07, 4");
     // Now drop many messages
     n1.sleep(1.seconds, true, true);
-    for (size_t i = 0; i < 10; i++)
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
     assert(3 == n1.call());
 
+    writefln("test07, 5");
     // Debug output, uncomment if needed
 
     version (none)
@@ -1410,6 +1325,7 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
+    writefln("test07");
 
     cleanupMainThread();
 }
@@ -1417,6 +1333,7 @@ unittest
 // Filter commands
 unittest
 {
+    writefln("test08, B");
     __gshared Transceiver node_tid;
 
     static interface API
@@ -1551,6 +1468,7 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
+    writefln("test08");
 
     cleanupMainThread();
 }
@@ -1558,6 +1476,7 @@ unittest
 // request timeouts (from main thread)
 unittest
 {
+    writefln("test09, B");
     import core.thread;
     import std.exception;
 
@@ -1592,6 +1511,7 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test09");
 
     cleanupMainThread();
 }
@@ -1599,6 +1519,7 @@ unittest
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
+    writefln("test10, B");
     import core.thread;
     import std.exception;
 
@@ -1638,6 +1559,7 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test10");
 
     cleanupMainThread();
 }
@@ -1645,6 +1567,7 @@ unittest
 // request timeouts (foreign node to another node)
 unittest
 {
+    writefln("test11, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1681,6 +1604,7 @@ unittest
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test11");
 
     cleanupMainThread();
 }
@@ -1688,6 +1612,7 @@ unittest
 // test-case for zombie responses
 unittest
 {
+    writefln("test12, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1726,6 +1651,7 @@ unittest
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test12");
 
     cleanupMainThread();
 }
@@ -1733,6 +1659,7 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
+    writefln("test13, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1766,6 +1693,7 @@ unittest
     Thread.sleep(1000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test13");
 
     cleanupMainThread();
 }
@@ -1773,6 +1701,7 @@ unittest
 // Test a node that gets a replay while it's delayed
 unittest
 {
+    writefln("test14, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1809,6 +1738,7 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test14");
 
     cleanupMainThread();
 }
@@ -1816,6 +1746,7 @@ unittest
 // Test explicit shutdown
 unittest
 {
+    writefln("test15, B");
     import std.exception;
 
     static interface API
@@ -1844,6 +1775,9 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+    writefln("test15");
 
     cleanupMainThread();
 }
+*/
+

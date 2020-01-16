@@ -368,11 +368,12 @@ public class ThreadScheduler : Scheduler, InfoObject
     public void spawn (void delegate () op, size_t sz = 0)
     {
         auto t = new Thread({
+            auto scheduler = new FiberScheduler();
+            thisScheduler = scheduler;
             scope (exit) {
                 thisInfo.cleanup(true);
                 remove(Thread.getThis());
             }
-            thisScheduler = new FiberScheduler();
             op();
         });
         t.start();
@@ -1642,7 +1643,7 @@ unittest
     });
 
     synchronized (mutex) {
-        condition.wait(1000.msecs);
+        condition.wait(2000.msecs);
     }
     assert(result == 4);
 
