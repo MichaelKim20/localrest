@@ -39,7 +39,7 @@
 
 *******************************************************************************/
 
-module geod24.concurrency2;
+module geod24.concurrency;
 
 import std.container;
 import std.range;

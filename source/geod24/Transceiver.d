@@ -10,7 +10,7 @@
 
 module geod24.Transceiver;
 
-import geod24.concurrency2;
+import geod24.concurrency;
 
 import core.time;
 

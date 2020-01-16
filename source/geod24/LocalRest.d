@@ -78,7 +78,7 @@
 
 module geod24.LocalRest;
 
-import geod24.concurrency2;
+import geod24.concurrency;
 import geod24.Transceiver;
 
 import vibe.data.json;
@@ -1021,7 +1021,7 @@ unittest
 unittest
 {
     import std.conv;
-    import geod24.concurrency2;
+    import geod24.concurrency;
     import geod24.Registry;
 
     __gshared Registry registry;
@@ -1116,7 +1116,7 @@ unittest
 /// This network have different types of nodes in it
 unittest
 {
-    import geod24.concurrency2;
+    import geod24.concurrency;
 
     static interface API
     {
@@ -1197,7 +1197,7 @@ unittest
 /// Support for circular nodes call
 unittest
 {
-    import geod24.concurrency2;
+    import geod24.concurrency;
     import std.format;
 
     __gshared Transceiver[string] tbn;
