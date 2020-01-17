@@ -41,6 +41,8 @@
 
 module geod24.concurrency;
 
+import geod24.variant;
+
 import std.container;
 import std.range;
 
