@@ -103,91 +103,6 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-/*******************************************************************************
-
-    After making the request, wait until the response comes,
-    and find the response that suits the request.
-
-*******************************************************************************/
-
-private class WaitingManager : InfoObject
-{
-    /// Just a Condition with a state
-    private struct Waiting
-    {
-        Condition c;
-        bool busy;
-    }
-
-    /// The 'Response' we are currently processing, if any
-    public Response pending;
-
-    /// Request IDs waiting for a response
-    public Waiting[ulong] waiting;
-
-
-    /// Get the next available request ID
-    public size_t getNextResponseId () @safe nothrow
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    /// Wait for a response.
-    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
-    {
-        try
-        {
-            if (id !in this.waiting)
-                this.waiting[id] = Waiting(thisScheduler.newCondition(null), false);
-
-            Waiting* ptr = &this.waiting[id];
-            if (ptr.busy)
-                assert(0, "Trying to override a pending request");
-
-            ptr.busy = true;
-
-            if (duration == Duration.init)
-                ptr.c.wait();
-            else if (!ptr.c.wait(duration))
-                this.pending = Response(Status.Timeout, id, "");
-
-            ptr.busy = false;
-
-            scope(exit) this.pending = Response.init;
-            return this.pending;
-        }
-        catch (Exception e)
-        {
-            import std.format;
-            assert(0, format("Exception - %s", e.message));
-        }
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id) @safe nothrow
-    {
-        this.waiting.remove(id);
-    }
-
-    /// Returns true if a key value equal to id exists.
-    public bool exist (size_t id) @safe nothrow
-    {
-        return ((id in this.waiting) !is null);
-    }
-
-    ///
-    public void cleanup (bool root)
-    {
-        if (root)
-        {
-            this.waiting.clear();
-        } else{
-        }
-   }
-}
-
-
 /// Helper template to get the constructor's parameters
 private static template CtorParams (Impl)
 {
@@ -195,75 +110,6 @@ private static template CtorParams (Impl)
         private alias CtorParams = Parameters!(Impl.__ctor);
     else
         private alias CtorParams = AliasSeq!();
-}
-
-
-/***************************************************************************
-
-    Getter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property WaitingManager thisWaitingManager () nothrow
-{
-    if (auto p = "WaitingManager" in thisInfo.objectValues)
-        return cast(WaitingManager)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisWaitingManager (WaitingManager value) nothrow
-{
-    thisInfo.objectValues["WaitingManager"] = cast(InfoObject)value;
-}
-
-
-public class ThreadInfoEx : InfoObject
-{
-    public bool is_node;
-
-    this (bool value)
-    {
-        this.is_node = value;
-    }
-
-    public void cleanup (bool root)
-    {
-    }
-}
-
-
-/***************************************************************************
-
-    Getter of ThreadInfoEx assigned to a called thread.
-
-***************************************************************************/
-
-public @property ThreadInfoEx thisThreadInfoEx () nothrow
-{
-    if (auto p = "ThreadInfoEx" in thisInfo.objectValues)
-        return cast(ThreadInfoEx)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of ThreadInfoEx assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisThreadInfoEx (ThreadInfoEx value) nothrow
-{
-    thisInfo.objectValues["ThreadInfoEx"] = cast(InfoObject)value;
 }
 
 
@@ -456,7 +302,7 @@ public class RemoteAPI (API) : API
             auto node = new Implementation(cargs);
             auto ts = new Transceiver();
             auto wm = new WaitingManager();
-            auto ie = new ThreadInfoEx(true);
+            thisInfo.tag = 1;
             Control control;
             Request[] await_req;
             Response[] await_res;
@@ -467,7 +313,6 @@ public class RemoteAPI (API) : API
             thisScheduler.start({
                 thisTransceiver = ts;
                 thisWaitingManager = wm;
-                thisThreadInfoEx = ie;
                 transceiver = ts;
 
                 started = true;
@@ -499,13 +344,8 @@ public class RemoteAPI (API) : API
                     thisWaitingManager.remove(res.id);
                 }
 
-                writefln("thisTransceiver %s", thisTransceiver);
                 while (!terminate)
                 {
-
-                    if (thisTransceiver is null)
-                        writefln("thisTransceiver %s", thisTransceiver);
-
                     if (thisTransceiver.tryReceive(&msg))
                     {
                         switch (msg.tag)
@@ -801,7 +641,7 @@ public class RemoteAPI (API) : API
                         Response res;
 
                         // from Node to Node
-                        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
+                        if (thisInfo.tag == 1)
                         {
                             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
                             this._transceiver.send(req);
@@ -1218,9 +1058,8 @@ unittest
     node.ctrl.shutdown();
     writefln("test05");
 
-    cleanupMainThread();
+    //cleanupMainThread();
 }
-
 /*
 // Sane name insurance policy
 unittest
@@ -1784,4 +1623,3 @@ unittest
     cleanupMainThread();
 }
 */
-

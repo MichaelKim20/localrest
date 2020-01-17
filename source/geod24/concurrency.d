@@ -49,6 +49,372 @@ import core.sync.mutex;
 import core.thread;
 
 
+/// Data sent by the caller
+public struct Request
+{
+    /// Transceiver of the sender thread
+    Transceiver sender;
+
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response`
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id;
+
+    /// Method to call
+    string method;
+
+    /// Arguments to the method, JSON formatted
+    string args;
+};
+
+
+/// Status of a request
+public enum Status
+{
+    /// Request failed
+    Failed,
+
+    /// Request timed-out
+    Timeout,
+
+    /// Request droped
+    Dropped,
+
+    /// Request succeeded
+    Success
+};
+
+
+/// Data sent by the callee back to the caller
+public struct Response
+{
+    /// Final status of a request (failed, timeout, success, etc)
+    Status status;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response` so the scheduler can
+    /// properly dispatch this event
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id;
+    /// If `status == Status.Success`, the JSON-serialized return value.
+    /// Otherwise, it contains `Exception.toString()`.
+    string data;
+};
+
+
+/// Filter out requests before they reach a node
+public struct FilterAPI
+{
+    /// the mangled symbol name of the function to filter
+    string func_mangleof;
+
+    /// used for debugging
+    string pretty_func;
+}
+
+
+/// Ask the node to exhibit a certain behavior for a given time
+public struct TimeCommand
+{
+    /// For how long our remote node apply this behavior
+    Duration dur;
+    /// Whether or not affected messages should be dropped
+    bool drop = false;
+
+    bool send_response_msg = true;
+}
+
+
+/// Ask the node to shut down
+public struct ShutdownCommand
+{
+}
+
+
+/// Status of a request
+public enum MessageType
+{
+    request,
+    response,
+    filter,
+    time_command,
+    shutdown_command
+};
+
+
+// very simple & limited variant, to keep it performant.
+// should be replaced by a real Variant later
+static struct Message
+{
+    this (Request msg) { this.req = msg; this.tag = MessageType.request; }
+    this (Response msg) { this.res = msg; this.tag = MessageType.response; }
+    this (FilterAPI msg) { this.filter = msg; this.tag = MessageType.filter; }
+    this (TimeCommand msg) { this.time = msg; this.tag = MessageType.time_command; }
+    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = MessageType.shutdown_command; }
+
+    union
+    {
+        Request req;
+        Response res;
+        FilterAPI filter;
+        TimeCommand time;
+        ShutdownCommand shutdown;
+    }
+
+    ubyte tag;
+}
+
+
+/*******************************************************************************
+
+    Receve request and response
+    Interfaces to and from data
+
+*******************************************************************************/
+
+public class Transceiver
+{
+    /// Channel of Request
+    public Channel!Message chan;
+
+    /// Ctor
+    public this () @safe nothrow
+    {
+        chan = new Channel!Message(64*1024);
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The `Message` to send.
+
+        In:
+            thisScheduler must not be null.
+
+    ***************************************************************************/
+
+    public void send (Message msg) @trusted
+    {
+        this.chan.send(msg);
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts Request
+
+        Params:
+            msg = The `Request` to send.
+
+    ***************************************************************************/
+
+    public void send (Request msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts Response
+
+        Params:
+            msg = The `Response` to send.
+
+    ***************************************************************************/
+
+    public void send (Response msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts TimeCommand
+
+        Params:
+            msg = The `TimeCommand` to send.
+
+    ***************************************************************************/
+
+    public void send (TimeCommand msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts ShutdownCommand
+
+        Params:
+            msg = The `ShutdownCommand` to send.
+
+    ***************************************************************************/
+
+    public void send (ShutdownCommand msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts FilterAPI
+
+        Params:
+            msg = The `FilterAPI` to send.
+
+    ***************************************************************************/
+
+    public void send (FilterAPI msg) @trusted
+    {
+        this.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received `Message`
+
+    ***************************************************************************/
+
+    public Message receive () @trusted
+    {
+        return this.chan.receive();
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    public bool tryReceive (Message *msg) @trusted
+    {
+        return this.chan.tryReceive(msg);
+    }
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    public void close () @trusted
+    {
+        this.chan.close();
+    }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this Transceiver.
+
+    ***************************************************************************/
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "TR(%x)", cast(void*) chan);
+    }
+}
+
+
+/*******************************************************************************
+
+    After making the request, wait until the response comes,
+    and find the response that suits the request.
+
+*******************************************************************************/
+
+public class WaitingManager
+{
+    /// Just a Condition with a state
+    private struct Waiting
+    {
+        Condition c;
+        bool busy;
+    }
+
+    /// The 'Response' we are currently processing, if any
+    public Response pending;
+
+    /// Request IDs waiting for a response
+    public Waiting[ulong] waiting;
+
+
+    /// Get the next available request ID
+    public size_t getNextResponseId () @safe nothrow
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+    /// Wait for a response.
+    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
+    {
+        try
+        {
+            if (id !in this.waiting)
+                this.waiting[id] = Waiting(thisScheduler.newCondition(null), false);
+
+            Waiting* ptr = &this.waiting[id];
+            if (ptr.busy)
+                assert(0, "Trying to override a pending request");
+
+            ptr.busy = true;
+
+            if (duration == Duration.init)
+                ptr.c.wait();
+            else if (!ptr.c.wait(duration))
+                this.pending = Response(Status.Timeout, id, "");
+
+            ptr.busy = false;
+
+            scope(exit) this.pending = Response.init;
+            return this.pending;
+        }
+        catch (Exception e)
+        {
+            import std.format;
+            assert(0, format("Exception - %s", e.message));
+        }
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id) @safe nothrow
+    {
+        this.waiting.remove(id);
+    }
+
+    /// Returns true if a key value equal to id exists.
+    public bool exist (size_t id) @safe nothrow
+    {
+        return ((id in this.waiting) !is null);
+    }
+
+    ///
+    public void cleanup ()
+    {
+        this.waiting.clear();
+   }
+}
+
 /*******************************************************************************
 
     Encapsulates all implementation-level data needed for scheduling.
@@ -61,8 +427,13 @@ import core.thread;
 
 public struct ThreadInfo
 {
-    ///
-    public InfoObject[string] objectValues;
+    Transceiver     transceiver;
+
+    FiberScheduler  scheduler;
+
+    WaitingManager  wmanager;
+
+    int tag;
 
     /***************************************************************************
 
@@ -73,6 +444,7 @@ public struct ThreadInfo
         Scheduler.
 
     ***************************************************************************/
+
 
     static @property ref thisInfo () nothrow
     {
@@ -95,28 +467,100 @@ public struct ThreadInfo
 
     ***************************************************************************/
 
-    public void cleanup (bool root)
+    public void cleanup ()
     {
-        foreach (ref info; objectValues)
-            if (info !is null)
-                info.cleanup(root);
-
-        foreach (key; objectValues.keys)
-            objectValues.remove(key);
+        if (this.transceiver)
+            this.transceiver.close();
+        if (this.scheduler)
+            this.scheduler.stop();
+        if (this.wmanager)
+            this.wmanager.cleanup();
     }
 }
 
-/// Types of Objects You Can Add to ThreadInfo.objectValues
-public interface InfoObject
-{
-    /// Cleans up this when a thread terminates.
-    void cleanup (bool root);
-}
 
 /// Information of a Current Thread or Fiber
 public @property ref ThreadInfo thisInfo () nothrow
 {
     return ThreadInfo.thisInfo;
+}
+
+
+/***************************************************************************
+
+    Getter of Transceiver assigned to a called thread.
+
+    Returns:
+        Returns instance of `Transceiver` that is created by top thread.
+
+***************************************************************************/
+
+public @property Transceiver thisTransceiver () nothrow
+{
+    return thisInfo.transceiver;
+}
+
+
+/***************************************************************************
+
+    Setter of Transceiver assigned to a called thread.
+
+    Params:
+        value = The instance of `Transceiver`.
+
+***************************************************************************/
+
+public @property void thisTransceiver (Transceiver value) nothrow
+{
+    thisInfo.transceiver = value;
+}
+
+
+/***************************************************************************
+
+    Getter of Scheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property FiberScheduler thisScheduler () nothrow
+{
+    return thisInfo.scheduler;
+}
+
+
+/***************************************************************************
+
+    Setter of Scheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisScheduler (FiberScheduler value) nothrow
+{
+    thisInfo.scheduler = value;
+}
+
+
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property WaitingManager thisWaitingManager () nothrow
+{
+    return thisInfo.wmanager;
+}
+
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisWaitingManager (WaitingManager value) nothrow
+{
+    thisInfo.wmanager = value;
 }
 
 
@@ -155,174 +599,8 @@ public @property ref ThreadInfo thisInfo () nothrow
 
 *******************************************************************************/
 
-interface Scheduler
+public class ThreadScheduler
 {
-    /***************************************************************************
-
-        Spawns the supplied op and starts the Scheduler.
-
-        This is intended to be called at the start of the program to yield all
-        scheduling to the active Scheduler instance.  This is necessary for
-        schedulers that explicitly dispatch threads rather than simply relying
-        on the operating system to do so, and so start should always be called
-        within main() to begin normal program execution.
-
-        Params:
-            op = A wrapper for whatever the main thread would have done in the
-                absence of a custom scheduler. It will be automatically executed
-                via a call to spawn by the Scheduler.
-            sz = The size of the stack.
-
-    ***************************************************************************/
-
-    void start (void delegate() op, size_t sz = 0);
-
-
-    /***************************************************************************
-
-        This commands the scheduler to shut down at the end of the program.
-
-    ***************************************************************************/
-
-    void stop ();
-
-
-    /***************************************************************************
-
-        Assigns a logical thread to execute the supplied op.
-
-        This routine is called by spawn.  It is expected to instantiate a new
-        logical thread and run the supplied operation.
-
-        Params:
-            op = The function to execute. This may be the actual function passed
-                by the user to spawn itself, or may be a wrapper function.
-            sz = The size of the stack.
-
-    ***************************************************************************/
-
-    void spawn (void delegate() op, size_t sz = 0);
-
-
-    /***************************************************************************
-
-        Yields execution to another logical thread.
-
-        This routine is called at various points within concurrency-aware APIs
-        to provide a scheduler a chance to yield execution when using some sort
-        of cooperative multithreading model.  If this is not appropriate, such
-        as when each logical thread is backed by a dedicated kernel thread,
-        this routine may be a no-op.
-
-    ***************************************************************************/
-
-    void yield () nothrow;
-
-
-    /***************************************************************************
-
-        Returns an appropriate ThreadInfo instance.
-
-        Returns an instance of ThreadInfo specific to the logical thread that
-        is calling this routine or, if the calling thread was not create by
-        this scheduler, returns ThreadInfo.thisInfo instead.
-
-    ***************************************************************************/
-
-    @property ref ThreadInfo thisInfo () nothrow;
-
-
-    /***************************************************************************
-
-        Creates a Condition variable analog for signaling.
-
-        Creates a new Condition variable analog which is used to check for and
-        to signal the addition of messages to a thread's message queue.  Like
-        yield, some schedulers may need to define custom behavior so that calls
-        to Condition.wait() yield to another thread when no new messages are
-        available instead of blocking.
-
-        Params:
-            m = The Mutex that will be associated with this condition. It will be
-                locked prior to any operation on the condition, and so in some
-                cases a Scheduler may need to hold this reference and unlock the
-                mutex before yielding execution to another logical thread.
-
-    ***************************************************************************/
-
-    Condition newCondition (Mutex m) nothrow;
-
-
-    /***************************************************************************
-
-        Wait until notified.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-
-    ***************************************************************************/
-
-    void wait (Condition c);
-
-
-    /***************************************************************************
-
-        Suspends the calling thread until a notification occurs or until
-        the supplied time period has elapsed.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-            period = The time to wait.
-
-    ***************************************************************************/
-
-    bool wait (Condition c, Duration period);
-
-
-    /***************************************************************************
-
-        Notifies one waiter.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-
-    ***************************************************************************/
-
-    void notify (Condition c);
-
-
-    /***************************************************************************
-
-        Notifies all waiters.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-
-    ***************************************************************************/
-
-    void notifyAll (Condition c);
-}
-
-/*******************************************************************************
-
-    An Scheduler using kernel threads.
-
-    This is an Scheduler that mirrors the default scheduling behavior
-    of creating one kernel thread per call to spawn.  It is fully functional
-    and may be instantiated and used, but is not a necessary part of the
-    default functioning of this module.
-
-*******************************************************************************/
-
-public class ThreadScheduler : Scheduler, InfoObject
-{
-    /// For Condition
-    private Mutex mutex;
-
 
     /***************************************************************************
 
@@ -332,25 +610,12 @@ public class ThreadScheduler : Scheduler, InfoObject
         Params:
             op = The function to execute. This may be the actual function passed
                 by the user to spawn itself, or may be a wrapper function.
-            sz = The size of the stack.
 
     ***************************************************************************/
 
-    public void start (void delegate () op, size_t sz = 0)
+    public void start (void delegate () op)
     {
         op();
-    }
-
-
-    /***************************************************************************
-
-        This commands the scheduler to shut down at the end of the program.
-
-    ***************************************************************************/
-
-    public void stop ()
-    {
-
     }
 
 
@@ -361,24 +626,23 @@ public class ThreadScheduler : Scheduler, InfoObject
         Params:
             op = The function to execute. This may be the actual function passed
                 by the user to spawn itself, or may be a wrapper function.
-            sz = The size of the stack.
 
     ***************************************************************************/
 
-    public void spawn (void delegate () op, size_t sz = 0)
+    public void spawn (void delegate () op)
     {
         auto t = new Thread({
-            auto scheduler = new FiberScheduler();
-            thisScheduler = scheduler;
+            thisScheduler = new FiberScheduler();
+            thisTransceiver = new Transceiver();
             scope (exit) {
-                thisInfo.cleanup(true);
+                thisInfo.cleanup();
                 remove(Thread.getThis());
             }
             op();
         });
         t.start();
 
-        synchronized( this )
+        synchronized (this)
         {
             m_all[t] = t;
         }
@@ -407,139 +671,6 @@ public class ThreadScheduler : Scheduler, InfoObject
     public @property ref ThreadInfo thisInfo () nothrow
     {
         return ThreadInfo.thisInfo;
-    }
-
-
-    /***************************************************************************
-
-        Creates a new Condition variable.  No custom behavior is needed here.
-
-        Params:
-            m = The Mutex that will be associated with this condition.
-
-    ***************************************************************************/
-
-    public Condition newCondition (Mutex m) nothrow
-    {
-        if (m is null)
-        {
-            if (this.mutex is null)
-                this.mutex = new Mutex;
-
-            m = this.mutex;
-        }
-        return  new Condition(m);
-    }
-
-
-    /***************************************************************************
-
-        Wait until notified.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-
-    ***************************************************************************/
-
-    public void wait (Condition c)
-    {
-        if (c.mutex !is null)
-            c.mutex.lock();
-
-        scope (exit)
-             if (c.mutex !is null)
-                c.mutex.unlock();
-
-        c.wait();
-    }
-
-
-    /***************************************************************************
-
-        Suspends the calling thread until a notification occurs or until
-        the supplied time period has elapsed.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-            period = The time to wait.
-
-    ***************************************************************************/
-
-    public bool wait (Condition c, Duration period)
-    {
-        if (c.mutex !is null)
-            c.mutex.lock();
-
-        scope (exit)
-             if (c.mutex !is null)
-                c.mutex.unlock();
-
-        return c.wait(period);
-    }
-
-
-    /***************************************************************************
-
-        Notifies one waiter.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-
-    ***************************************************************************/
-
-    public void notify (Condition c)
-    {
-        if (c.mutex !is null)
-            c.mutex.lock();
-
-        scope (exit)
-             if (c.mutex !is null)
-                c.mutex.unlock();
-
-        c.notify();
-    }
-
-
-    /***************************************************************************
-
-        Notifies all waiters.
-
-        Params:
-            c = A condition variable analog which is used to check for and
-                to signal the addition of messages to a thread's message queue
-
-    ***************************************************************************/
-
-    public void notifyAll (Condition c)
-    {
-        if (c.mutex !is null)
-            c.mutex.lock();
-
-        scope (exit)
-             if (c.mutex !is null)
-                c.mutex.unlock();
-
-        c.notifyAll();
-    }
-
-
-    /***************************************************************************
-
-        Cleans up this FiberScheduler.
-        This must be called when a thread terminates.
-
-        Params:
-            root = The top is a Thread and the fibers exist below it.
-                   Thread is root, if this value is true,
-                   then it is to clean the value that Thread had.
-
-    ***************************************************************************/
-
-    public void cleanup (bool root)
-    {
     }
 
     private Thread[Thread]  m_all;
@@ -653,13 +784,13 @@ public class ThreadScheduler : Scheduler, InfoObject
 
 /*******************************************************************************
 
-    Clean all `InfoObjects` in use from main thread.
+    Clean in use from main thread.
 
 *******************************************************************************/
 
 public void cleanupMainThread ()
 {
-    thisInfo.cleanup(true);
+    thisInfo.cleanup();
 }
 
 
@@ -672,7 +803,7 @@ public void cleanupMainThread ()
 
 *******************************************************************************/
 
-class FiberScheduler : Scheduler, InfoObject
+class FiberScheduler
 {
     private Mutex mutex;
     private bool terminated;
@@ -1050,22 +1181,15 @@ class FiberScheduler : Scheduler, InfoObject
         this.dispatching = true;
         while (m_fibers.length > 0)
         {
-            try {
-                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-                if (t !is null && !(cast(ChannelClosed) t) && !(cast(WaitingClosed) t))
-                {
-                    throw t;
-                }
-                if (m_fibers[m_pos].state == Fiber.State.TERM)
-                {
-                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                        m_pos = 0;
-                }
-                else if (m_pos++ >= m_fibers.length - 1)
-                {
+            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+            if (m_fibers[m_pos].state == Fiber.State.TERM)
+            {
+                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
                     m_pos = 0;
-                }
-            } catch (Exception) {
+            }
+            else if (m_pos++ >= m_fibers.length - 1)
+            {
+                m_pos = 0;
             }
 
             if (terminated)
@@ -1076,33 +1200,6 @@ class FiberScheduler : Scheduler, InfoObject
 
     private Fiber[] m_fibers;
     private size_t m_pos;
-}
-
-
-/***************************************************************************
-
-    Getter of Scheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property Scheduler thisScheduler () nothrow
-{
-    if (auto p = "scheduler" in thisInfo.objectValues)
-        return cast(Scheduler)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of Scheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisScheduler (Scheduler value) nothrow
-{
-    thisInfo.objectValues["scheduler"] = cast(InfoObject)value;
 }
 
 
@@ -1120,23 +1217,6 @@ public class ChannelClosed : Exception
         super(msg);
     }
 }
-
-
-/*******************************************************************************
-
-    When the waiting is closed.
-
-*******************************************************************************/
-
-public class WaitingClosed : Exception
-{
-    /// Ctor
-    public this (string msg = "Waiting Closed") @safe pure nothrow @nogc
-    {
-        super(msg);
-    }
-}
-
 
 /*******************************************************************************
 
@@ -1570,80 +1650,6 @@ unittest
 
     synchronized (mutex) {
         condition.wait(1000.msecs);
-    }
-    assert(result == 4);
-
-    cleanupMainThread();
-}
-
-/// Thread1 -> [ channel2 ] -> Thread2 -> [ channel1 ] -> Thread1
-unittest
-{
-    auto channel1 = new Channel!int;
-    auto channel2 = new Channel!int;
-    auto thread_scheduler = new ThreadScheduler();
-    int result;
-
-    Mutex mutex = new Mutex;
-    Condition condition = new Condition(mutex);
-
-    // Thread1
-    thread_scheduler.spawn({
-        thisScheduler = thread_scheduler;
-        channel2.send(2);
-        result = channel1.receive();
-        synchronized (mutex) {
-            condition.notify;
-        }
-    });
-
-    // Thread2
-    thread_scheduler.spawn({
-        thisScheduler = thread_scheduler;
-        int res = channel2.receive();
-        channel1.send(res*res);
-    });
-
-    synchronized (mutex) {
-        condition.wait(1000.msecs);
-    }
-    assert(result == 4);
-
-    cleanupMainThread();
-}
-
-/// Thread1 -> [ channel2 ] -> Fiber1 in Thread 2 -> [ channel1 ] -> Thread1
-unittest
-{
-    auto channel1 = new Channel!int;
-    auto channel2 = new Channel!int;
-    auto thread_scheduler = new ThreadScheduler();
-    int result;
-
-    Mutex mutex = new Mutex;
-    Condition condition = new Condition(mutex);
-
-    // Thread1
-    thread_scheduler.spawn({
-        thisScheduler = thread_scheduler;
-        channel2.send(2);
-        result = channel1.receive();
-        synchronized (mutex) {
-            condition.notify;
-        }
-    });
-
-    // Thread2
-    thread_scheduler.spawn({
-        // Fiber1
-        thisScheduler.start({
-            auto res = channel2.receive();
-            channel1.send(res*res);
-        });
-    });
-
-    synchronized (mutex) {
-        condition.wait(2000.msecs);
     }
     assert(result == 4);
 
