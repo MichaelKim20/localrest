@@ -795,7 +795,7 @@ public class RemoteAPI (API) : API
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
 
-                    auto res = (Transceiver remote, string method, string args) @trusted
+                    auto res = () @trusted
                     {
                         Request req;
                         Response res;
@@ -803,8 +803,8 @@ public class RemoteAPI (API) : API
                         // from Node to Node
                         if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
                         {
-                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
-                            remote.send(req);
+                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
+                            this._transceiver.send(req);
 
                             res = thisWaitingManager.waitResponse(req.id, this._timeout);
                         }
@@ -822,10 +822,10 @@ public class RemoteAPI (API) : API
                                 thisTransceiver = new Transceiver();
 
                             bool terminated = false;
-                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
+                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             thisScheduler.spawn({
-                                remote.send(req);
+                                this._transceiver.send(req);
                             });
 
                             thisScheduler.spawn({
@@ -856,7 +856,7 @@ public class RemoteAPI (API) : API
                             });
                         }
                         return res;
-                    } (this._transceiver, ovrld.mangleof, serialized);
+                    } ();
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
