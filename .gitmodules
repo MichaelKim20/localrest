@@ -1,0 +1,3 @@
+[submodule "minivariant"]
+	path = submodules/minivariant
+	url = https://github.com/Geod24/minivariant.git
