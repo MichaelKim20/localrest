@@ -499,8 +499,12 @@ public class RemoteAPI (API) : API
                     thisWaitingManager.remove(res.id);
                 }
 
+                writefln("thisTransceiver %s", thisTransceiver);
                 while (!terminate)
                 {
+
+                    if (thisTransceiver is null)
+                        writefln("thisTransceiver %s", thisTransceiver);
 
                     if (thisTransceiver.tryReceive(&msg))
                     {
