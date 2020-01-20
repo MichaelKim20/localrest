@@ -79,7 +79,6 @@
 module geod24.LocalRest;
 
 import geod24.concurrency;
-import geod24.Transceiver;
 
 import vibe.data.json;
 
@@ -388,6 +387,7 @@ public class RemoteAPI (API) : API
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
                     }
+
                     if (thisScheduler !is null)
                         thisScheduler.yield();
 
@@ -406,7 +406,6 @@ public class RemoteAPI (API) : API
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
                         }
-
                         if (await_drop_req.length > 0)
                         {
                             await_drop_req.each!(req => handleDropReq(req));
@@ -414,6 +413,7 @@ public class RemoteAPI (API) : API
                             assumeSafeAppend(await_drop_req);
                         }
                     }
+
                     if (thisScheduler !is null)
                         thisScheduler.yield();
                 }
@@ -680,6 +680,7 @@ public class RemoteAPI (API) : API
                                         {
                                             thisWaitingManager.pending = msg.res;
                                             thisWaitingManager.waiting[msg.res.id].c.notify();
+                                            thisWaitingManager.remove(res.id);
                                         }
 
                                         if (msg.res.id == req.id)
@@ -709,7 +710,7 @@ public class RemoteAPI (API) : API
             });
         }
 }
-
+/*
 /// Simple usage example
 unittest
 {
@@ -1572,6 +1573,90 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+
+    cleanupMainThread();
+}
+*/
+
+import std.stdio;
+
+// Simulate temporary outage
+unittest
+{
+    writefln("test07, B");
+    __gshared Transceiver n1transceive;
+
+    static interface API
+    {
+        public ulong call ();
+        public void asyncCall ();
+    }
+
+    static class Node : API
+    {
+        public this()
+        {
+            if (n1transceive !is null)
+                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
+        }
+
+        public override ulong call () { return ++this.count; }
+        public override void  asyncCall () { runTask(() => cast(void)this.remote.call); }
+        size_t count;
+        RemoteAPI!API remote;
+    }
+
+    auto n1 = RemoteAPI!API.spawn!Node();
+    n1transceive = n1.ctrl.transceiver;
+    auto n2 = RemoteAPI!API.spawn!Node();
+
+    writefln("test07, 1");
+    /// Make sure calls are *relatively* efficient
+    auto current1 = MonoTime.currTime();
+    assert(1 == n1.call());
+    assert(1 == n2.call());
+    auto current2 = MonoTime.currTime();
+    assert(current2 - current1 < 200.msecs);
+
+    writefln("test07, 2");
+    // Make one of the node sleep
+    n1.sleep(1.seconds);
+    // Make sure our main thread is not suspended,
+    // nor is the second node
+    assert(2 == n2.call());
+    auto current3 = MonoTime.currTime();
+    assert(current3 - current2 < 400.msecs);
+
+    writefln("test07, 3");
+    // Wait for n1 to unblock
+    assert(2 == n1.call());
+    // Check current time >= 1 second
+    auto current4 = MonoTime.currTime();
+    assert(current4 - current2 >= 1.seconds);
+
+    writefln("test07, 4");
+    // Now drop many messages
+    n1.sleep(1.seconds, true, true);
+    for (size_t i = 0; i < 10; i++)
+        n2.asyncCall();
+    // Make sure we don't end up blocked forever
+    Thread.sleep(1500.msecs);
+    assert(3 == n1.call());
+
+    writefln("test07, 5");
+    // Debug output, uncomment if needed
+
+    version (none)
+    {
+        import std.stdio;
+        writeln("Two non-blocking calls: ", current2 - current1);
+        writeln("Sleep + non-blocking call: ", current3 - current2);
+        writeln("Delta since sleep: ", current4 - current2);
+    }
+
+    n1.ctrl.shutdown();
+    n2.ctrl.shutdown();
+    writefln("test07");
 
     cleanupMainThread();
 }

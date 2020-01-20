@@ -416,6 +416,8 @@ public class WaitingManager
     ///
     public void cleanup ()
     {
+        //foreach(e; this.waiting)
+        //    e.c.notify();
         this.waiting.clear();
    }
 }

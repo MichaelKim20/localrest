@@ -11,7 +11,6 @@ module geod24.Registry;
 
 import core.sync.mutex;
 import geod24.concurrency;
-import geod24.Transceiver;
 
 /// Ditto
 public shared struct Registry
