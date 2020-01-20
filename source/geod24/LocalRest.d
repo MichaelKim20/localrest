@@ -710,7 +710,7 @@ public class RemoteAPI (API) : API
             });
         }
 }
-/*
+
 /// Simple usage example
 unittest
 {
@@ -1043,8 +1043,6 @@ unittest
 // Sane name insurance policy
 unittest
 {
-    import geod24.Transceiver;
-
     static interface API
     {
         public ulong transceiver ();
@@ -1124,8 +1122,9 @@ unittest
     for (size_t i = 0; i < 10; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1500.msecs);
+    Thread.sleep(1.seconds);
     assert(3 == n1.call());
+    Thread.sleep(1.seconds);
 
     // Debug output, uncomment if needed
 
@@ -1374,7 +1373,6 @@ unittest
 // request timeouts (foreign node to another node)
 unittest
 {
-    import geod24.Transceiver;
     import std.exception;
 
     __gshared Transceiver node_transceiver;
@@ -1417,7 +1415,6 @@ unittest
 // test-case for zombie responses
 unittest
 {
-    import geod24.Transceiver;
     import std.exception;
 
     __gshared Transceiver node_transceiver;
@@ -1462,7 +1459,6 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
-    import geod24.Transceiver;
     import std.exception;
 
     __gshared Transceiver node_transceiver;
@@ -1502,7 +1498,6 @@ unittest
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    import geod24.Transceiver;
     import std.exception;
 
     __gshared Transceiver node_transceiver;
@@ -1576,7 +1571,6 @@ unittest
 
     cleanupMainThread();
 }
-*/
 
 import std.stdio;
 
@@ -1640,8 +1634,9 @@ unittest
     for (size_t i = 0; i < 10; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1500.msecs);
+    Thread.sleep(1000.msecs);
     assert(3 == n1.call());
+    Thread.sleep(1000.msecs);
 
     writefln("test07, 5");
     // Debug output, uncomment if needed
