@@ -194,7 +194,8 @@ public class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        return new RemoteAPI(spawned!Impl(args), timeout);
+        auto transceiver = spawned!Impl(args);
+        return new RemoteAPI(transceiver, timeout);
     }
 
     /***************************************************************************
@@ -236,15 +237,20 @@ public class RemoteAPI (API) : API
 
                         auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
 
+                        //writefln("-------------------> handleRequest BEGIN %%s", member);
+
                         static if (!is(ReturnType!ovrld == void))
                         {
                             req.sender.send(Response(Status.Success, req.id, node.%1$s(args.args).serializeToJsonString()));
+                            //writefln("-------------------> handleRequest 1 %%s %%s", req.sender);
                         }
                         else
                         {
                             node.%1$s(args.args);
                             req.sender.send(Response(Status.Success, req.id));
+                            //writefln("-------------------> handleRequest 2");
                         }
+                        //writefln("-------------------> handleRequest END   %%s", member);
                     }
                     catch (Throwable t)
                     {
@@ -300,9 +306,6 @@ public class RemoteAPI (API) : API
 
             Message msg;
             auto node = new Implementation(cargs);
-            auto ts = new Transceiver();
-            auto wm = new WaitingManager();
-            thisInfo.tag = 1;
             Control control;
             Request[] await_req;
             Response[] await_res;
@@ -311,9 +314,10 @@ public class RemoteAPI (API) : API
             auto mutex = new Mutex;
 
             thisScheduler.start({
-                thisTransceiver = ts;
-                thisWaitingManager = wm;
-                transceiver = ts;
+                thisInfo.transceiver = new Transceiver();
+                thisInfo.wmanager = new WaitingManager();
+                thisInfo.tag = 1;
+                transceiver = thisInfo.transceiver;
 
                 started = true;
 
@@ -346,20 +350,29 @@ public class RemoteAPI (API) : API
 
                 while (!terminate)
                 {
+                    if (thisScheduler is null)
+                        break;
+
+                    if (thisTransceiver is null)
+                        break;
+
                     if (thisTransceiver.tryReceive(&msg))
                     {
                         switch (msg.tag)
                         {
                             case MessageType.request :
+                                //writefln("____________________ MessageType.request BEGIN %s", msg.req);
                                 if (!isSleeping())
                                     handleReq(msg.req);
                                 else if (!control.drop)
                                     await_req ~= msg.req;
                                 else if (control.send_response_msg)
                                     await_drop_req ~= msg.req;
+                                //writefln("____________________ MessageType.request END   %s", msg.req);
                                 break;
 
                             case MessageType.response :
+                                //writefln("____________________ MessageType.response BEGIN %s", msg.res);
                                 auto c = thisScheduler.newCondition(null);
                                 foreach (_; 0..10)
                                 {
@@ -371,6 +384,7 @@ public class RemoteAPI (API) : API
                                     handleRes(msg.res);
                                 else if (!control.drop)
                                     await_res ~= msg.res;
+                                //writefln("____________________ MessageType.response END   %s", msg.res);
                                 break;
 
                             case MessageType.filter :
@@ -385,13 +399,17 @@ public class RemoteAPI (API) : API
 
                             case MessageType.shutdown_command :
                                 terminate = true;
+                                writefln("MessageType.owner_terminated_command");
+                                thisTransceiver.close();
+                                //throw new OwnerTerminated();
                                 break;
 
                             default :
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
                     }
-                    thisScheduler.yield();
+                    if (thisScheduler !is null)
+                        thisScheduler.yield();
 
                     if (!isSleeping())
                     {
@@ -416,8 +434,8 @@ public class RemoteAPI (API) : API
                             assumeSafeAppend(await_drop_req);
                         }
                     }
-
-                    thisScheduler.yield();
+                    if (thisScheduler !is null)
+                        thisScheduler.yield();
                 }
             }, 16 * 1024 * 1024);
         });
@@ -498,11 +516,7 @@ public class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            if (this._transceiver)
-            {
-                this._transceiver.send(ShutdownCommand());
-                this._transceiver.close();
-            }
+            this._transceiver.send(ShutdownCommand());
         }
 
 
@@ -710,7 +724,7 @@ public class RemoteAPI (API) : API
             });
         }
 }
-/*
+
 /// Simple usage example
 unittest
 {
@@ -835,7 +849,8 @@ unittest
         chan.send(1);
     });
 
-    auto res = chan.receive();
+    int msg;
+    bool result = chan.receive(&msg);
 
     node1.ctrl.shutdown();
     node2.ctrl.shutdown();
@@ -988,7 +1003,7 @@ unittest
     cleanupMainThread();
     writefln("test04");
 }
-*/
+
 /// Nodes can start tasks
 unittest
 {
@@ -1045,6 +1060,7 @@ unittest
     writefln("test05, B 3");
     assert(node.getCounter() == 0);
     writefln("test05, B 4");
+
     core.thread.Thread.sleep(1.seconds);
     writefln("test05, B 5");
     // It should be 19 but some machines are very slow
@@ -1058,9 +1074,9 @@ unittest
     node.ctrl.shutdown();
     writefln("test05");
 
-    //cleanupMainThread();
+    cleanupMainThread();
 }
-/*
+
 // Sane name insurance policy
 unittest
 {
@@ -1622,4 +1638,3 @@ unittest
 
     cleanupMainThread();
 }
-*/

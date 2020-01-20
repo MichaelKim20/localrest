@@ -41,8 +41,6 @@
 
 module geod24.concurrency;
 
-import geod24.variant;
-
 import std.container;
 import std.range;
 
@@ -128,6 +126,12 @@ public struct TimeCommand
 
 /// Ask the node to shut down
 public struct ShutdownCommand
+{
+}
+
+
+/// Owner Terminate
+public struct OwnerTerminatedCommand
 {
 }
 
@@ -287,9 +291,9 @@ public class Transceiver
 
     ***************************************************************************/
 
-    public Message receive () @trusted
+    public bool receive (Message *msg) @trusted
     {
-        return this.chan.receive();
+        return this.chan.receive(msg);
     }
 
 
@@ -437,6 +441,7 @@ public struct ThreadInfo
 
     int tag;
 
+
     /***************************************************************************
 
         Gets a thread-local instance of ThreadInfo.
@@ -446,7 +451,6 @@ public struct ThreadInfo
         Scheduler.
 
     ***************************************************************************/
-
 
     static @property ref thisInfo () nothrow
     {
@@ -471,12 +475,12 @@ public struct ThreadInfo
 
     public void cleanup ()
     {
-        if (this.transceiver)
-            this.transceiver.close();
-        if (this.scheduler)
-            this.scheduler.stop();
-        if (this.wmanager)
-            this.wmanager.cleanup();
+        //if (this.transceiver)
+        //    this.transceiver.close();
+        //if (this.scheduler)
+        //    this.scheduler.stop();
+        //if (this.wmanager)
+        //    this.wmanager.cleanup();
     }
 }
 
@@ -635,19 +639,12 @@ public class ThreadScheduler
     {
         auto t = new Thread({
             thisScheduler = new FiberScheduler();
-            thisTransceiver = new Transceiver();
             scope (exit) {
                 thisInfo.cleanup();
-                remove(Thread.getThis());
             }
             op();
         });
         t.start();
-
-        synchronized (this)
-        {
-            m_all[t] = t;
-        }
     }
 
 
@@ -674,113 +671,6 @@ public class ThreadScheduler
     {
         return ThreadInfo.thisInfo;
     }
-
-    private Thread[Thread]  m_all;
-
-    /***************************************************************************
-
-        Add t to the list of tracked threads if it is not already being tracked.
-
-        Params:
-            t = The thread to add.
-
-        In:
-            t must not be null.
-
-    ***************************************************************************/
-
-    final void add (Thread t)
-    in
-    {
-        assert(t);
-    }
-    do
-    {
-        synchronized(this)
-        {
-            m_all[t] = t;
-        }
-    }
-
-
-    /***************************************************************************
-
-        Removes t from the list of tracked threads.  No operation will be
-        performed if t is not currently being tracked by this object.
-
-        Params:
-            t = The thread to remove.
-
-        In:
-            t must not be null.
-
-    ***************************************************************************/
-
-    final void remove (Thread t)
-    in
-    {
-        assert(t);
-    }
-    do
-    {
-        synchronized(this)
-        {
-            m_all.remove(t);
-        }
-    }
-
-
-    /***************************************************************************
-
-        Operates on all threads currently tracked by this object.
-
-    ***************************************************************************/
-
-    final int opApply (scope int delegate(ref Thread) dg)
-    {
-        synchronized(this)
-        {
-            int ret = 0;
-
-            // NOTE: This loop relies on the knowledge that m_all uses the
-            //       Thread object for both the key and the mapped value.
-            foreach (Thread t; m_all.keys)
-            {
-                ret = dg(t );
-                if (ret)
-                    break;
-            }
-            return ret;
-        }
-    }
-
-
-    /***************************************************************************
-
-        Iteratively joins all tracked threads.  This function will block add,
-        remove, and opApply until it completes.
-
-        Params:
-            rethrow = Rethrow any unhandled exception which may have caused the
-                      current thread to terminate.
-
-        Throws:
-            Any exception not handled by the joined threads.
-
-    ***************************************************************************/
-
-    final void joinAll (bool rethrow = true)
-    {
-        synchronized(this)
-        {
-            // NOTE: This loop relies on the knowledge that m_all uses the
-            //       Thread object for both the key and the mapped value.
-            foreach (Thread t; m_all.keys)
-            {
-                t.join(rethrow);
-            }
-        }
-    }
 }
 
 
@@ -792,6 +682,7 @@ public class ThreadScheduler
 
 public void cleanupMainThread ()
 {
+    Thread.sleep(1.seconds);
     thisInfo.cleanup();
 }
 
@@ -896,6 +787,7 @@ class FiberScheduler
         return ThreadInfo.thisInfo;
     }
 
+
     /***************************************************************************
 
         Returns a Condition analog that yields when wait or notify is called.
@@ -908,29 +800,6 @@ class FiberScheduler
     public Condition newCondition (Mutex m) nothrow
     {
         return new FiberCondition(m);
-    }
-
-    /***************************************************************************
-
-        Cleans up this FiberScheduler.
-        This must be called when a thread terminates.
-
-        Params:
-            root = The top is a Thread and the fibers exist below it.
-                   Thread is root, if this value is true,
-                   then it is to clean the value that Thread had.
-
-    ***************************************************************************/
-
-    public void cleanup (bool root)
-    {
-        if (terminated)
-            return;
-
-        if (root)
-        {
-            this.stop();
-        }
     }
 
 
@@ -1045,13 +914,15 @@ class FiberScheduler
             op();
         }
 
+        InfoFiber f;
+        if (sz == 0)
+            f = new InfoFiber(&wrap);
+        else
+            f = new InfoFiber(&wrap, sz);
+
         this.mutex.lock_nothrow();
         scope(exit) this.mutex.unlock_nothrow();
-
-        if (sz == 0)
-            m_fibers ~= new InfoFiber(&wrap);
-        else
-            m_fibers ~= new InfoFiber(&wrap, sz);
+        this.m_fibers ~= f;
     }
 
 
@@ -1077,7 +948,6 @@ class FiberScheduler
 
     public class FiberCondition : Condition
     {
-
         /// Ctor
         public this (Mutex m) nothrow
         {
@@ -1093,7 +963,7 @@ class FiberScheduler
 
         public override void wait () nothrow
         {
-            scope (exit) notified = false;
+            scope(exit) notified = false;
 
             while (!notified)
                 switchContext();
@@ -1114,7 +984,7 @@ class FiberScheduler
         {
             import core.time : MonoTime;
 
-            scope (exit) notified = false;
+            scope(exit) notified = false;
 
             for (auto limit = MonoTime.currTime + period;
                  !notified && !period.isNegative;
@@ -1175,27 +1045,43 @@ class FiberScheduler
     {
         import std.algorithm.mutation : remove;
 
-        this.mutex.lock_nothrow();
-        scope(exit) this.mutex.unlock_nothrow();
-
-        if (this.dispatching) return;
+        if (this.dispatching)
+            return;
 
         this.dispatching = true;
-        while (m_fibers.length > 0)
-        {
-            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (m_fibers[m_pos].state == Fiber.State.TERM)
-            {
-                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                    m_pos = 0;
-            }
-            else if (m_pos++ >= m_fibers.length - 1)
-            {
-                m_pos = 0;
-            }
 
-            if (terminated)
-                break;
+        while (true)
+        {
+            try
+            {
+                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+                if (t !is null && !(cast(OwnerTerminated) t))
+                {
+                    throw t;
+                }
+
+                if (m_fibers[m_pos].state == Fiber.State.TERM)
+                {
+                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                        m_pos = 0;
+                }
+                else if (m_pos++ >= m_fibers.length - 1)
+                {
+                    m_pos = 0;
+                }
+
+                if (m_fibers.length == 0)
+                {
+                    break;
+                }
+
+                if (terminated)
+                {
+                    break;
+                }
+            } catch (Exception)
+            {
+            }
         }
         this.dispatching = false;
     }
@@ -1207,14 +1093,14 @@ class FiberScheduler
 
 /*******************************************************************************
 
-    When the channel is closed, it is thrown when the `receive` is called.
+    When the owner is terminated.
 
 *******************************************************************************/
 
-public class ChannelClosed : Exception
+public class OwnerTerminated : Exception
 {
     /// Ctor
-    public this (string msg = "Channel Closed") @safe pure nothrow @nogc
+    public this (string msg = "Owner Terminated") @safe pure nothrow @nogc
     {
         super(msg);
     }
@@ -1314,21 +1200,18 @@ public class Channel (T)
             }
 
             {
-                if (thisScheduler !is null)
-                {
-                    ChannelContext!T new_context;
-                    new_context.msg_ptr = null;
-                    new_context.msg = msg;
-                    new_context.condition = thisScheduler.newCondition(null);
+                ChannelContext!T new_context;
+                new_context.msg_ptr = null;
+                new_context.msg = msg;
+                new_context.condition = thisScheduler.newCondition(null);
 
-                    this.sendq.insertBack(new_context);
-                    this.mutex.unlock();
+                this.sendq.insertBack(new_context);
+                this.mutex.unlock();
 
-                    thisScheduler.wait(new_context.condition);
-                }
+                thisScheduler.wait(new_context.condition);
+                return true;
             }
 
-            return true;
         }
 
         if (thisScheduler !is null)
@@ -1357,20 +1240,17 @@ public class Channel (T)
 
     ***************************************************************************/
 
-    public T receive ()
+    public bool receive (T* msg)
     {
-        T _receive()
+        bool _receive(T* msg)
         {
-            T res;
-            T *msg = &res;
-
             this.mutex.lock();
 
             if (this.closed)
             {
                 (*msg) = T.init;
                 this.mutex.unlock();
-                throw new ChannelClosed();
+                return false;
             }
 
             if (this.sendq[].walkLength > 0)
@@ -1384,7 +1264,7 @@ public class Channel (T)
                     if (thisScheduler !is null)
                         thisScheduler.notify(context.condition);
 
-                return res;
+                return true;
             }
 
             if (this.queue[].walkLength > 0)
@@ -1394,35 +1274,32 @@ public class Channel (T)
 
                 this.mutex.unlock();
 
-                return res;
+                return true;
             }
 
             {
-                if (thisScheduler !is null)
-                {
-                    ChannelContext!T new_context;
-                    new_context.msg_ptr = msg;
-                    new_context.condition = thisScheduler.newCondition(null);
+                ChannelContext!T new_context;
+                new_context.msg_ptr = msg;
+                new_context.condition = thisScheduler.newCondition(null);
 
-                    this.recvq.insertBack(new_context);
-                    this.mutex.unlock();
+                this.recvq.insertBack(new_context);
+                this.mutex.unlock();
 
-                    thisScheduler.wait(new_context.condition);
-                }
+                thisScheduler.wait(new_context.condition);
+
+                return true;
             }
-
-            return res;
         }
 
         if (thisScheduler !is null)
-            return _receive();
+            return _receive(msg);
         else
         {
-            T res;
+            bool res;
             thisScheduler = new FiberScheduler();
             auto c = thisScheduler.newCondition(null);
             thisScheduler.start({
-                res = _receive();
+                res = _receive(msg);
                 thisScheduler.notify(c);
             });
             thisScheduler.wait(c);
@@ -1449,7 +1326,7 @@ public class Channel (T)
             if (this.closed)
             {
                 this.mutex.unlock();
-                throw new ChannelClosed();
+                return false;
             }
 
             if (this.sendq[].walkLength > 0)
@@ -1596,15 +1473,16 @@ unittest
             //  Fiber1
             thisScheduler.spawn({
                 channel2.send(2);
-                result = channel1.receive();
+                channel1.receive(&result);
                 synchronized (mutex) {
                     condition.notify;
                 }
             });
             //  Fiber2
             thisScheduler.spawn({
-                int res = channel2.receive();
-                channel1.send(res*res);
+                int msg;
+                channel2.receive(&msg);
+                channel1.send(msg*msg);
             });
         });
     });
@@ -1634,7 +1512,7 @@ unittest
         // Fiber1
         thisScheduler.start({
             channel2.send(2);
-            result = channel1.receive();
+            channel1.receive(&result);
             synchronized (mutex) {
                 condition.notify;
             }
@@ -1645,8 +1523,9 @@ unittest
     thread_scheduler.spawn({
         // Fiber2
         thisScheduler.start({
-            int res = channel2.receive();
-            channel1.send(res*res);
+            int msg;
+            channel2.receive(&msg);
+            channel1.send(msg*msg);
         });
     });
 
@@ -1675,7 +1554,7 @@ unittest
             //  Fiber1 - It'll be tangled.
             thisScheduler.spawn({
                 channel_qs0.send(2);
-                result = channel_qs0.receive();
+                channel_qs0.receive(&result);
                 thisScheduler.notify(cond);
             });
 
@@ -1684,7 +1563,7 @@ unittest
 
             //  Fiber2 - Unravel a tangle
             thisScheduler.spawn({
-                result = channel_qs0.receive();
+                channel_qs0.receive(&result);
                 channel_qs0.send(2);
             });
 
@@ -1694,7 +1573,7 @@ unittest
             //  Fiber3 - It'll not be tangled, because queue size is 1
             thisScheduler.spawn({
                 channel_qs1.send(2);
-                result = channel_qs1.receive();
+                channel_qs1.receive(&result);
                 thisScheduler.notify(cond);
             });
 
