@@ -188,7 +188,6 @@ public class Transceiver
         chan = new Channel!Message(64*1024);
     }
 
-
     /***************************************************************************
 
         It is a function that accepts Message
@@ -475,12 +474,6 @@ public struct ThreadInfo
 
     public void cleanup ()
     {
-        //if (this.transceiver)
-        //    this.transceiver.close();
-        //if (this.scheduler)
-        //    this.scheduler.stop();
-        //if (this.wmanager)
-        //    this.wmanager.cleanup();
     }
 }
 
@@ -682,7 +675,7 @@ public class ThreadScheduler
 
 public void cleanupMainThread ()
 {
-    Thread.sleep(1.seconds);
+    thread_joinAll();
     thisInfo.cleanup();
 }
 
@@ -1055,9 +1048,12 @@ class FiberScheduler
             try
             {
                 auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-                if (t !is null && !(cast(OwnerTerminated) t))
+                if (t !is null)
                 {
-                    throw t;
+                    if (cast(OwnerTerminate) t)
+                        break;
+                    else
+                        throw t;
                 }
 
                 if (m_fibers[m_pos].state == Fiber.State.TERM)
@@ -1097,7 +1093,7 @@ class FiberScheduler
 
 *******************************************************************************/
 
-public class OwnerTerminated : Exception
+public class OwnerTerminate : Exception
 {
     /// Ctor
     public this (string msg = "Owner Terminated") @safe pure nothrow @nogc

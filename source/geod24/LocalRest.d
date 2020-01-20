@@ -91,8 +91,6 @@ import core.sync.mutex;
 import core.thread;
 import core.time;
 
-import std.stdio;
-
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
@@ -237,20 +235,15 @@ public class RemoteAPI (API) : API
 
                         auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
 
-                        //writefln("-------------------> handleRequest BEGIN %%s", member);
-
                         static if (!is(ReturnType!ovrld == void))
                         {
                             req.sender.send(Response(Status.Success, req.id, node.%1$s(args.args).serializeToJsonString()));
-                            //writefln("-------------------> handleRequest 1 %%s %%s", req.sender);
                         }
                         else
                         {
                             node.%1$s(args.args);
                             req.sender.send(Response(Status.Success, req.id));
-                            //writefln("-------------------> handleRequest 2");
                         }
-                        //writefln("-------------------> handleRequest END   %%s", member);
                     }
                     catch (Throwable t)
                     {
@@ -303,7 +296,6 @@ public class RemoteAPI (API) : API
 
         auto thread_scheduler = new ThreadScheduler();
         thread_scheduler.spawn({
-
             Message msg;
             auto node = new Implementation(cargs);
             Control control;
@@ -350,29 +342,20 @@ public class RemoteAPI (API) : API
 
                 while (!terminate)
                 {
-                    if (thisScheduler is null)
-                        break;
-
-                    if (thisTransceiver is null)
-                        break;
-
                     if (thisTransceiver.tryReceive(&msg))
                     {
                         switch (msg.tag)
                         {
                             case MessageType.request :
-                                //writefln("____________________ MessageType.request BEGIN %s", msg.req);
                                 if (!isSleeping())
                                     handleReq(msg.req);
                                 else if (!control.drop)
                                     await_req ~= msg.req;
                                 else if (control.send_response_msg)
                                     await_drop_req ~= msg.req;
-                                //writefln("____________________ MessageType.request END   %s", msg.req);
                                 break;
 
                             case MessageType.response :
-                                //writefln("____________________ MessageType.response BEGIN %s", msg.res);
                                 auto c = thisScheduler.newCondition(null);
                                 foreach (_; 0..10)
                                 {
@@ -384,7 +367,6 @@ public class RemoteAPI (API) : API
                                     handleRes(msg.res);
                                 else if (!control.drop)
                                     await_res ~= msg.res;
-                                //writefln("____________________ MessageType.response END   %s", msg.res);
                                 break;
 
                             case MessageType.filter :
@@ -399,10 +381,8 @@ public class RemoteAPI (API) : API
 
                             case MessageType.shutdown_command :
                                 terminate = true;
-                                writefln("MessageType.owner_terminated_command");
                                 thisTransceiver.close();
-                                //throw new OwnerTerminated();
-                                break;
+                                throw new OwnerTerminate();
 
                             default :
                                 assert(0, "Unexpected type: " ~ msg.tag);
@@ -695,8 +675,13 @@ public class RemoteAPI (API) : API
                                                 break;
                                             thisScheduler.wait(c, 1.msecs);
                                         }
-                                        thisWaitingManager.pending = msg.res;
-                                        thisWaitingManager.waiting[msg.res.id].c.notify();
+
+                                        if (thisWaitingManager.exist(msg.res.id))
+                                        {
+                                            thisWaitingManager.pending = msg.res;
+                                            thisWaitingManager.waiting[msg.res.id].c.notify();
+                                        }
+
                                         if (msg.res.id == req.id)
                                             break;
                                     }
@@ -728,7 +713,6 @@ public class RemoteAPI (API) : API
 /// Simple usage example
 unittest
 {
-    writefln("test01, B");
     static interface API
     {
         @safe:
@@ -757,13 +741,11 @@ unittest
     test.ctrl.shutdown();
 
     cleanupMainThread();
-    writefln("test01");
 }
 
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
-    writefln("test02, B");
     import std.conv;
     import geod24.concurrency;
     import geod24.Registry;
@@ -856,13 +838,11 @@ unittest
     node2.ctrl.shutdown();
 
     cleanupMainThread();
-    writefln("test02");
 }
 
 /// This network have different types of nodes in it
 unittest
 {
-    writefln("test03, B");
     import geod24.concurrency;
 
     static interface API
@@ -919,39 +899,31 @@ unittest
     nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
     nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
 
-    writefln("test03 1");
     foreach (n; nodes)
     {
         assert(n.requests() == 0);
         assert(n.value() == 42);
     }
 
-    writefln("test03 2");
     assert(nodes[0].requests() == 4);
 
-    writefln("test03 3");
     foreach (n; nodes[1 .. $])
     {
         assert(n.value() == 42);
         assert(n.requests() == 2);
     }
 
-    writefln("test03 4");
     assert(nodes[0].requests() == 7);
 
-    writefln("test03 5");
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
 
-    writefln("test03 6");
     cleanupMainThread();
-    writefln("test03");
 }
 
 /// Support for circular nodes call
 unittest
 {
-    writefln("test04, B");
     import geod24.concurrency;
     import std.format;
 
@@ -1001,13 +973,11 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
 
     cleanupMainThread();
-    writefln("test04");
 }
 
 /// Nodes can start tasks
 unittest
 {
-    writefln("test05, B");
     import core.thread;
     import core.time;
 
@@ -1050,29 +1020,21 @@ unittest
         private bool terminate;
     }
 
-    writefln("test05, B 1");
     import std.format;
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
-    writefln("test05, B 2");
     assert(node.getCounter() == 1);
-    writefln("test05, B 3");
     assert(node.getCounter() == 0);
-    writefln("test05, B 4");
 
     core.thread.Thread.sleep(1.seconds);
-    writefln("test05, B 5");
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
-    writefln("test05, B 6");
     assert(node.getCounter() == 0);
-    writefln("test05, B 7");
     node.stop();
     core.thread.Thread.sleep(100.msecs);
     node.ctrl.shutdown();
-    writefln("test05");
 
     cleanupMainThread();
 }
@@ -1080,7 +1042,6 @@ unittest
 // Sane name insurance policy
 unittest
 {
-    writefln("test06, B");
     import geod24.Transceiver;
 
     static interface API
@@ -1103,7 +1064,6 @@ unittest
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
-    writefln("test06");
 
     cleanupMainThread();
 }
@@ -1111,7 +1071,6 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    writefln("test07, B");
     __gshared Transceiver n1transceive;
 
     static interface API
@@ -1138,7 +1097,6 @@ unittest
     n1transceive = n1.ctrl.transceiver;
     auto n2 = RemoteAPI!API.spawn!Node();
 
-    writefln("test07, 1");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
     assert(1 == n1.call());
@@ -1146,7 +1104,6 @@ unittest
     auto current2 = MonoTime.currTime();
     assert(current2 - current1 < 200.msecs);
 
-    writefln("test07, 2");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1155,23 +1112,20 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
-    writefln("test07, 3");
     // Wait for n1 to unblock
     assert(2 == n1.call());
     // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
     assert(current4 - current2 >= 1.seconds);
 
-    writefln("test07, 4");
     // Now drop many messages
     n1.sleep(1.seconds, true, true);
-    for (size_t i = 0; i < 100; i++)
+    for (size_t i = 0; i < 10; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
+    Thread.sleep(1500.msecs);
     assert(3 == n1.call());
 
-    writefln("test07, 5");
     // Debug output, uncomment if needed
 
     version (none)
@@ -1184,7 +1138,6 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
-    writefln("test07");
 
     cleanupMainThread();
 }
@@ -1192,7 +1145,6 @@ unittest
 // Filter commands
 unittest
 {
-    writefln("test08, B");
     __gshared Transceiver node_tid;
 
     static interface API
@@ -1327,7 +1279,6 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
-    writefln("test08");
 
     cleanupMainThread();
 }
@@ -1335,7 +1286,6 @@ unittest
 // request timeouts (from main thread)
 unittest
 {
-    writefln("test09, B");
     import core.thread;
     import std.exception;
 
@@ -1370,7 +1320,6 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
-    writefln("test09");
 
     cleanupMainThread();
 }
@@ -1378,7 +1327,6 @@ unittest
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
-    writefln("test10, B");
     import core.thread;
     import std.exception;
 
@@ -1418,7 +1366,6 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
-    writefln("test10");
 
     cleanupMainThread();
 }
@@ -1426,7 +1373,6 @@ unittest
 // request timeouts (foreign node to another node)
 unittest
 {
-    writefln("test11, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1463,7 +1409,6 @@ unittest
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    writefln("test11");
 
     cleanupMainThread();
 }
@@ -1471,7 +1416,6 @@ unittest
 // test-case for zombie responses
 unittest
 {
-    writefln("test12, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1510,7 +1454,6 @@ unittest
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    writefln("test12");
 
     cleanupMainThread();
 }
@@ -1518,7 +1461,6 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
-    writefln("test13, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1552,7 +1494,6 @@ unittest
     Thread.sleep(1000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    writefln("test13");
 
     cleanupMainThread();
 }
@@ -1560,7 +1501,6 @@ unittest
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    writefln("test14, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1597,7 +1537,6 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    writefln("test14");
 
     cleanupMainThread();
 }
@@ -1605,7 +1544,6 @@ unittest
 // Test explicit shutdown
 unittest
 {
-    writefln("test15, B");
     import std.exception;
 
     static interface API
@@ -1634,7 +1572,6 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
-    writefln("test15");
 
     cleanupMainThread();
 }
