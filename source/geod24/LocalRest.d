@@ -90,6 +90,335 @@ import core.sync.mutex;
 import core.thread;
 import core.time;
 
+import std.stdio;
+
+
+/// Data sent by the caller
+public struct Request
+{
+    /// Transceiver of the sender thread
+    LocalTransceiver sender;
+
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response`
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id;
+
+    /// Method to call
+    string method;
+
+    /// Arguments to the method, JSON formatted
+    string args;
+};
+
+
+/// Status of a request
+public enum Status
+{
+    /// Request failed
+    Failed,
+
+    /// Request timed-out
+    Timeout,
+
+    /// Request droped
+    Dropped,
+
+    /// Request succeeded
+    Success
+};
+
+
+/// Data sent by the callee back to the caller
+public struct Response
+{
+    /// Final status of a request (failed, timeout, success, etc)
+    Status status;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response` so the scheduler can
+    /// properly dispatch this event
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id;
+    /// If `status == Status.Success`, the JSON-serialized return value.
+    /// Otherwise, it contains `Exception.toString()`.
+    string data;
+};
+
+
+/// Filter out requests before they reach a node
+public struct FilterAPI
+{
+    /// the mangled symbol name of the function to filter
+    string func_mangleof;
+
+    /// used for debugging
+    string pretty_func;
+}
+
+
+/// Ask the node to exhibit a certain behavior for a given time
+public struct TimeCommand
+{
+    /// For how long our remote node apply this behavior
+    Duration dur;
+    /// Whether or not affected messages should be dropped
+    bool drop = false;
+
+    bool send_response_msg = true;
+}
+
+
+/// Ask the node to shut down
+public struct ShutdownCommand
+{
+}
+
+
+/// Status of a request
+public enum MessageType
+{
+    request,
+    response,
+    filter,
+    time_command,
+    shutdown_command
+};
+
+
+// very simple & limited variant, to keep it performant.
+// should be replaced by a real Variant later
+static struct Message
+{
+    this (Request msg) { this.req = msg; this.tag = MessageType.request; }
+    this (Response msg) { this.res = msg; this.tag = MessageType.response; }
+    this (FilterAPI msg) { this.filter = msg; this.tag = MessageType.filter; }
+    this (TimeCommand msg) { this.time = msg; this.tag = MessageType.time_command; }
+    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = MessageType.shutdown_command; }
+
+    union
+    {
+        Request req;
+        Response res;
+        FilterAPI filter;
+        TimeCommand time;
+        ShutdownCommand shutdown;
+    }
+
+    ubyte tag;
+}
+
+/*******************************************************************************
+
+    Receve request and response
+    Interfaces to and from data
+
+*******************************************************************************/
+
+public class LocalTransceiver : Transceiver
+{
+    /// Channel of Request
+    public Channel!Message chan;
+
+    /// Ctor
+    public this () @safe nothrow
+    {
+        chan = new Channel!Message(64*1024);
+    }
+
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The message to send.
+
+    ***************************************************************************/
+
+    public void send (T) (T msg) @trusted
+    {
+        if (is (T == Message))
+            this.chan.send(cast(Message)msg);
+        else
+            this.chan.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received `Message`
+
+    ***************************************************************************/
+
+    public bool receive (T) (T *msg) @trusted
+    {
+        if (is (T == Message))
+            return this.chan.receive(cast(Message*)msg);
+        else
+            assert(0, "Unexpected type of message.");
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    public bool tryReceive (T) (T *msg) @trusted
+    {
+        if (is (T == Message))
+            return this.chan.tryReceive(msg);
+        else
+            assert(0, "Unexpected type of message.");
+    }
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    override public void close () @trusted
+    {
+        this.chan.close();
+    }
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    override public @property bool isClosed () @safe @nogc pure
+    {
+        return false;
+    }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this LocalTransceiver.
+
+    ***************************************************************************/
+
+    override public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "TR(%x)", cast(void*) chan);
+    }
+}
+
+/***************************************************************************
+
+    Getter of LocalTransceiver assigned to a called thread.
+
+    Returns:
+        Returns instance of `LocalTransceiver` that is created by top thread.
+
+***************************************************************************/
+
+public @property LocalTransceiver thisLocalTransceiver () nothrow
+{
+    return cast(LocalTransceiver)thisInfo.transceiver;
+}
+
+
+/***************************************************************************
+
+    Setter of TransceLocalTransceiveriver assigned to a called thread.
+
+    Params:
+        value = The instance of `LocalTransceiver`.
+
+***************************************************************************/
+
+public @property void thisLocalTransceiver (LocalTransceiver value) nothrow
+{
+    thisInfo.transceiver = cast(Transceiver)value;
+}
+
+
+public class LocalWaitingManager : WaitingManager
+{
+    /// The 'Response' we are currently processing, if any
+    public Response pending;
+
+    /// Wait for a response.
+    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
+    {
+        try
+        {
+            if (id !in this.waiting)
+                this.waiting[id] = Waiting(thisScheduler.newCondition(null), false);
+
+            Waiting* ptr = &this.waiting[id];
+            if (ptr.busy)
+                assert(0, "Trying to override a pending request");
+
+            ptr.busy = true;
+
+            if (duration == Duration.init)
+                ptr.c.wait();
+            else if (!ptr.c.wait(duration))
+                this.pending = Response(Status.Timeout, id, "");
+
+            ptr.busy = false;
+
+            scope(exit) this.pending = Response.init;
+            return this.pending;
+        }
+        catch (Exception e)
+        {
+            import std.format;
+            assert(0, format("Exception - %s", e.message));
+        }
+    }
+    ///
+    override public void cleanup ()
+    {
+        foreach (ref elem; this.waiting)
+            elem.c.notify();
+        this.waiting.clear();
+    }
+}
+
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property LocalWaitingManager thisLocalWaitingManager () nothrow
+{
+    return cast(LocalWaitingManager)thisInfo.wmanager;
+}
+
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisLocalWaitingManager (LocalWaitingManager value) nothrow
+{
+    thisInfo.wmanager = cast(WaitingManager)value;
+}
+
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
@@ -264,7 +593,7 @@ public class RemoteAPI (API) : API
         Main dispatch function
 
         This function receive string-serialized messages from the calling thread,
-        which is a struct with the sender's Transceiver, the method's mangleof,
+        which is a struct with the sender's LocalTransceiver, the method's mangleof,
         and the method's arguments as a tuple, serialized to a JSON string.
 
         Params:
@@ -273,14 +602,14 @@ public class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static Transceiver spawned (Implementation) (CtorParams!Implementation cargs)
+    private static LocalTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
         import std.container;
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
 
-        Transceiver transceiver;
+        LocalTransceiver transceiver;
 
         // used for controling filtering / sleep
         struct Control
@@ -302,13 +631,12 @@ public class RemoteAPI (API) : API
             Response[] await_res;
             Request[] await_drop_req;
             bool terminate = false;
-            auto mutex = new Mutex;
 
             thisScheduler.start({
-                thisInfo.transceiver = new Transceiver();
-                thisInfo.wmanager = new WaitingManager();
+                thisLocalTransceiver = new LocalTransceiver();
+                thisLocalWaitingManager = new LocalWaitingManager();
                 thisInfo.tag = 1;
-                transceiver = thisInfo.transceiver;
+                transceiver = thisLocalTransceiver;
 
                 started = true;
 
@@ -334,14 +662,14 @@ public class RemoteAPI (API) : API
 
                 void handleRes (Response res)
                 {
-                    thisWaitingManager.pending = res;
-                    thisWaitingManager.waiting[res.id].c.notify();
-                    thisWaitingManager.remove(res.id);
+                    thisLocalWaitingManager.pending = res;
+                    thisLocalWaitingManager.waiting[res.id].c.notify();
+                    thisLocalWaitingManager.remove(res.id);
                 }
 
                 while (!terminate)
                 {
-                    if (thisTransceiver.tryReceive(&msg))
+                    if (thisLocalTransceiver.tryReceive(&msg))
                     {
                         switch (msg.tag)
                         {
@@ -358,7 +686,7 @@ public class RemoteAPI (API) : API
                                 auto c = thisScheduler.newCondition(null);
                                 foreach (_; 0..10)
                                 {
-                                    if (thisWaitingManager.exist(msg.res.id))
+                                    if (thisLocalWaitingManager.exist(msg.res.id))
                                         break;
                                     thisScheduler.wait(c, 10.msecs);
                                 }
@@ -379,8 +707,10 @@ public class RemoteAPI (API) : API
                                 break;
 
                             case MessageType.shutdown_command :
+                                thisLocalWaitingManager.stop();
+                                thisLocalWaitingManager.cleanup();
+                                thisLocalTransceiver.close();
                                 terminate = true;
-                                thisTransceiver.close();
                                 throw new OwnerTerminate();
 
                             default :
@@ -406,6 +736,7 @@ public class RemoteAPI (API) : API
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
                         }
+
                         if (await_drop_req.length > 0)
                         {
                             await_drop_req.each!(req => handleDropReq(req));
@@ -428,7 +759,7 @@ public class RemoteAPI (API) : API
     }
 
     /// A device that can requests.
-    private Transceiver _transceiver;
+    private LocalTransceiver _transceiver;
 
 
     /// Timeout to use when issuing requests
@@ -447,12 +778,12 @@ public class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-            transceiver = `Transceiver` of the node.
+            transceiver = `LocalTransceiver` of the node.
             timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (Transceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (LocalTransceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
     {
         this._transceiver = transceiver;
         this._timeout = timeout;
@@ -478,11 +809,11 @@ public class RemoteAPI (API) : API
 
         /***********************************************************************
 
-            Returns the `Transceiver`
+            Returns the `LocalTransceiver`
 
         ***********************************************************************/
 
-        @property public Transceiver transceiver () @safe nothrow
+        @property public LocalTransceiver transceiver () @safe nothrow
         {
             return this._transceiver;
         }
@@ -637,10 +968,10 @@ public class RemoteAPI (API) : API
                         // from Node to Node
                         if (thisInfo.tag == 1)
                         {
-                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
+                            req = Request(thisLocalTransceiver, thisLocalWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
                             this._transceiver.send(req);
 
-                            res = thisWaitingManager.waitResponse(req.id, this._timeout);
+                            res = thisLocalWaitingManager.waitResponse(req.id, this._timeout);
                         }
 
                         // from Non-Node to Node
@@ -649,14 +980,14 @@ public class RemoteAPI (API) : API
                             if (thisScheduler is null)
                                 thisScheduler = new FiberScheduler();
 
-                            if (thisWaitingManager is null)
-                                thisWaitingManager = new WaitingManager();
+                            if (thisLocalWaitingManager is null)
+                                thisLocalWaitingManager = new LocalWaitingManager();
 
-                            if (thisTransceiver is null)
-                                thisTransceiver = new Transceiver();
+                            if (thisLocalTransceiver is null)
+                                thisLocalTransceiver = new LocalTransceiver();
 
                             bool terminated = false;
-                            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
+                            req = Request(thisLocalTransceiver, thisLocalWaitingManager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             thisScheduler.spawn({
                                 this._transceiver.send(req);
@@ -666,21 +997,21 @@ public class RemoteAPI (API) : API
                                 Message msg;
                                 while (!terminated)
                                 {
-                                    if (thisTransceiver.tryReceive(&msg))
+                                    if (thisLocalTransceiver.tryReceive(&msg))
                                     {
                                         scope c = thisScheduler.newCondition(null);
                                         foreach (_; 0..10)
                                         {
-                                            if (thisWaitingManager.exist(msg.res.id))
+                                            if (thisLocalWaitingManager.exist(msg.res.id))
                                                 break;
                                             thisScheduler.wait(c, 1.msecs);
                                         }
 
-                                        if (thisWaitingManager.exist(msg.res.id))
+                                        if (thisLocalWaitingManager.exist(msg.res.id))
                                         {
-                                            thisWaitingManager.pending = msg.res;
-                                            thisWaitingManager.waiting[msg.res.id].c.notify();
-                                            thisWaitingManager.remove(res.id);
+                                            thisLocalWaitingManager.pending = msg.res;
+                                            thisLocalWaitingManager.waiting[msg.res.id].c.notify();
+                                            thisLocalWaitingManager.remove(res.id);
                                         }
 
                                         if (msg.res.id == req.id)
@@ -691,7 +1022,7 @@ public class RemoteAPI (API) : API
                             });
 
                             thisScheduler.start({
-                                res = thisWaitingManager.waitResponse(req.id, this._timeout);
+                                res = thisLocalWaitingManager.waitResponse(req.id, this._timeout);
                                 terminated = true;
                             });
                         }
@@ -710,7 +1041,7 @@ public class RemoteAPI (API) : API
             });
         }
 }
-
+/*
 /// Simple usage example
 unittest
 {
@@ -741,7 +1072,7 @@ unittest
 
     test.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -838,7 +1169,7 @@ unittest
     node1.ctrl.shutdown();
     node2.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 /// This network have different types of nodes in it
@@ -919,7 +1250,7 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 /// Support for circular nodes call
@@ -973,7 +1304,7 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 /// Nodes can start tasks
@@ -1037,7 +1368,7 @@ unittest
     core.thread.Thread.sleep(100.msecs);
     node.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // Sane name insurance policy
@@ -1064,7 +1395,7 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // Simulate temporary outage
@@ -1139,7 +1470,7 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // Filter commands
@@ -1280,7 +1611,7 @@ unittest
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // request timeouts (from main thread)
@@ -1321,7 +1652,7 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1367,7 +1698,7 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // request timeouts (foreign node to another node)
@@ -1409,7 +1740,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // test-case for zombie responses
@@ -1453,7 +1784,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // request timeouts with dropped messages
@@ -1492,7 +1823,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1534,7 +1865,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // Test explicit shutdown
@@ -1569,16 +1900,16 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 
-    cleanupMainThread();
+    thread_joinAll();
 }
-
+*/
 import std.stdio;
 
 // Simulate temporary outage
 unittest
 {
     writefln("test07, B");
-    __gshared Transceiver n1transceive;
+    __gshared LocalTransceiver n1transceive;
 
     static interface API
     {
@@ -1634,9 +1965,8 @@ unittest
     for (size_t i = 0; i < 10; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1000.msecs);
+    Thread.sleep(2000.msecs);
     assert(3 == n1.call());
-    Thread.sleep(1000.msecs);
 
     writefln("test07, 5");
     // Debug output, uncomment if needed
@@ -1653,5 +1983,5 @@ unittest
     n2.ctrl.shutdown();
     writefln("test07");
 
-    cleanupMainThread();
+    thread_joinAll();
 }

@@ -65,7 +65,7 @@ public shared struct Registry
         {
             if (name in transceiverByName)
                 return false;
-            if (transceiver.chan.isClosed)
+            if (transceiver.isClosed)
                 return false;
             this.namesByTransceiver[transceiver] ~= name;
             this.transceiverByName[name] = cast(shared)transceiver;

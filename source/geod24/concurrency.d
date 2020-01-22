@@ -49,522 +49,6 @@ import core.sync.mutex;
 import core.thread;
 
 
-/// Data sent by the caller
-public struct Request
-{
-    /// Transceiver of the sender thread
-    Transceiver sender;
-
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-
-    /// Method to call
-    string method;
-
-    /// Arguments to the method, JSON formatted
-    string args;
-};
-
-
-/// Status of a request
-public enum Status
-{
-    /// Request failed
-    Failed,
-
-    /// Request timed-out
-    Timeout,
-
-    /// Request droped
-    Dropped,
-
-    /// Request succeeded
-    Success
-};
-
-
-/// Data sent by the callee back to the caller
-public struct Response
-{
-    /// Final status of a request (failed, timeout, success, etc)
-    Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
-    /// Otherwise, it contains `Exception.toString()`.
-    string data;
-};
-
-
-/// Filter out requests before they reach a node
-public struct FilterAPI
-{
-    /// the mangled symbol name of the function to filter
-    string func_mangleof;
-
-    /// used for debugging
-    string pretty_func;
-}
-
-
-/// Ask the node to exhibit a certain behavior for a given time
-public struct TimeCommand
-{
-    /// For how long our remote node apply this behavior
-    Duration dur;
-    /// Whether or not affected messages should be dropped
-    bool drop = false;
-
-    bool send_response_msg = true;
-}
-
-
-/// Ask the node to shut down
-public struct ShutdownCommand
-{
-}
-
-
-/// Owner Terminate
-public struct OwnerTerminatedCommand
-{
-}
-
-
-/// Status of a request
-public enum MessageType
-{
-    request,
-    response,
-    filter,
-    time_command,
-    shutdown_command
-};
-
-
-// very simple & limited variant, to keep it performant.
-// should be replaced by a real Variant later
-static struct Message
-{
-    this (Request msg) { this.req = msg; this.tag = MessageType.request; }
-    this (Response msg) { this.res = msg; this.tag = MessageType.response; }
-    this (FilterAPI msg) { this.filter = msg; this.tag = MessageType.filter; }
-    this (TimeCommand msg) { this.time = msg; this.tag = MessageType.time_command; }
-    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = MessageType.shutdown_command; }
-
-    union
-    {
-        Request req;
-        Response res;
-        FilterAPI filter;
-        TimeCommand time;
-        ShutdownCommand shutdown;
-    }
-
-    ubyte tag;
-}
-
-
-/*******************************************************************************
-
-    Receve request and response
-    Interfaces to and from data
-
-*******************************************************************************/
-
-public class Transceiver
-{
-    /// Channel of Request
-    public Channel!Message chan;
-
-    /// Ctor
-    public this () @safe nothrow
-    {
-        chan = new Channel!Message(64*1024);
-    }
-
-    /***************************************************************************
-
-        It is a function that accepts Message
-
-        Params:
-            msg = The `Message` to send.
-
-        In:
-            thisScheduler must not be null.
-
-    ***************************************************************************/
-
-    public void send (Message msg) @trusted
-    {
-        this.chan.send(msg);
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts Request
-
-        Params:
-            msg = The `Request` to send.
-
-    ***************************************************************************/
-
-    public void send (Request msg) @trusted
-    {
-        this.send(Message(msg));
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts Response
-
-        Params:
-            msg = The `Response` to send.
-
-    ***************************************************************************/
-
-    public void send (Response msg) @trusted
-    {
-        this.send(Message(msg));
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts TimeCommand
-
-        Params:
-            msg = The `TimeCommand` to send.
-
-    ***************************************************************************/
-
-    public void send (TimeCommand msg) @trusted
-    {
-        this.send(Message(msg));
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts ShutdownCommand
-
-        Params:
-            msg = The `ShutdownCommand` to send.
-
-    ***************************************************************************/
-
-    public void send (ShutdownCommand msg) @trusted
-    {
-        this.send(Message(msg));
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts FilterAPI
-
-        Params:
-            msg = The `FilterAPI` to send.
-
-    ***************************************************************************/
-
-    public void send (FilterAPI msg) @trusted
-    {
-        this.send(Message(msg));
-    }
-
-
-    /***************************************************************************
-
-        Return the received message.
-
-        Returns:
-            A received `Message`
-
-    ***************************************************************************/
-
-    public bool receive (Message *msg) @trusted
-    {
-        return this.chan.receive(msg);
-    }
-
-
-    /***************************************************************************
-
-        Return the received message.
-
-        Params:
-            msg = The `Message` pointer to receive.
-
-        Returns:
-            Returns true when message has been received. Otherwise false
-
-    ***************************************************************************/
-
-    public bool tryReceive (Message *msg) @trusted
-    {
-        return this.chan.tryReceive(msg);
-    }
-
-
-    /***************************************************************************
-
-        Close the `Channel`
-
-    ***************************************************************************/
-
-    public void close () @trusted
-    {
-        this.chan.close();
-    }
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this Transceiver.
-
-    ***************************************************************************/
-
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "TR(%x)", cast(void*) chan);
-    }
-}
-
-
-/*******************************************************************************
-
-    After making the request, wait until the response comes,
-    and find the response that suits the request.
-
-*******************************************************************************/
-
-public class WaitingManager
-{
-    /// Just a Condition with a state
-    private struct Waiting
-    {
-        Condition c;
-        bool busy;
-    }
-
-    /// The 'Response' we are currently processing, if any
-    public Response pending;
-
-    /// Request IDs waiting for a response
-    public Waiting[ulong] waiting;
-
-
-    /// Get the next available request ID
-    public size_t getNextResponseId () @safe nothrow
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    /// Wait for a response.
-    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
-    {
-        try
-        {
-            if (id !in this.waiting)
-                this.waiting[id] = Waiting(thisScheduler.newCondition(null), false);
-
-            Waiting* ptr = &this.waiting[id];
-            if (ptr.busy)
-                assert(0, "Trying to override a pending request");
-
-            ptr.busy = true;
-
-            if (duration == Duration.init)
-                ptr.c.wait();
-            else if (!ptr.c.wait(duration))
-                this.pending = Response(Status.Timeout, id, "");
-
-            ptr.busy = false;
-
-            scope(exit) this.pending = Response.init;
-            return this.pending;
-        }
-        catch (Exception e)
-        {
-            import std.format;
-            assert(0, format("Exception - %s", e.message));
-        }
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id) @safe nothrow
-    {
-        this.waiting.remove(id);
-    }
-
-    /// Returns true if a key value equal to id exists.
-    public bool exist (size_t id) @safe nothrow
-    {
-        return ((id in this.waiting) !is null);
-    }
-
-    ///
-    public void cleanup ()
-    {
-        //foreach(e; this.waiting)
-        //    e.c.notify();
-        this.waiting.clear();
-   }
-}
-
-/*******************************************************************************
-
-    Encapsulates all implementation-level data needed for scheduling.
-
-    When defining a Scheduler, an instance of this struct must be associated
-    with each logical thread.  It contains all implementation-level information
-    needed by the internal API.
-
-*******************************************************************************/
-
-public struct ThreadInfo
-{
-    Transceiver     transceiver;
-
-    FiberScheduler  scheduler;
-
-    WaitingManager  wmanager;
-
-    int tag;
-
-
-    /***************************************************************************
-
-        Gets a thread-local instance of ThreadInfo.
-
-        Gets a thread-local instance of ThreadInfo, which should be used as the
-        default instance when info is requested for a thread not created by the
-        Scheduler.
-
-    ***************************************************************************/
-
-    static @property ref thisInfo () nothrow
-    {
-        static ThreadInfo val;
-        return val;
-    }
-
-    /***************************************************************************
-
-        Cleans up this ThreadInfo.
-
-        This must be called when a scheduled thread terminates.  It tears down
-        the messaging system for the thread and notifies interested parties of
-        the thread's termination.
-
-        Params:
-            root = The top is a Thread and the fibers exist below it.
-                   Thread is root, if this value is true,
-                   then it is to clean the value that Thread had.
-
-    ***************************************************************************/
-
-    public void cleanup ()
-    {
-    }
-}
-
-
-/// Information of a Current Thread or Fiber
-public @property ref ThreadInfo thisInfo () nothrow
-{
-    return ThreadInfo.thisInfo;
-}
-
-
-/***************************************************************************
-
-    Getter of Transceiver assigned to a called thread.
-
-    Returns:
-        Returns instance of `Transceiver` that is created by top thread.
-
-***************************************************************************/
-
-public @property Transceiver thisTransceiver () nothrow
-{
-    return thisInfo.transceiver;
-}
-
-
-/***************************************************************************
-
-    Setter of Transceiver assigned to a called thread.
-
-    Params:
-        value = The instance of `Transceiver`.
-
-***************************************************************************/
-
-public @property void thisTransceiver (Transceiver value) nothrow
-{
-    thisInfo.transceiver = value;
-}
-
-
-/***************************************************************************
-
-    Getter of Scheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property FiberScheduler thisScheduler () nothrow
-{
-    return thisInfo.scheduler;
-}
-
-
-/***************************************************************************
-
-    Setter of Scheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisScheduler (FiberScheduler value) nothrow
-{
-    thisInfo.scheduler = value;
-}
-
-
-/***************************************************************************
-
-    Getter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property WaitingManager thisWaitingManager () nothrow
-{
-    return thisInfo.wmanager;
-}
-
-
-/***************************************************************************
-
-    Setter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisWaitingManager (WaitingManager value) nothrow
-{
-    thisInfo.wmanager = value;
-}
-
-
 /*******************************************************************************
 
     A Scheduler controls how threading is performed by spawn.
@@ -668,20 +152,6 @@ public class ThreadScheduler
     }
 }
 
-
-/*******************************************************************************
-
-    Clean in use from main thread.
-
-*******************************************************************************/
-
-public void cleanupMainThread ()
-{
-    thread_joinAll();
-    thisInfo.cleanup();
-}
-
-
 /*******************************************************************************
 
     An Scheduler using Fibers.
@@ -693,14 +163,8 @@ public void cleanupMainThread ()
 
 class FiberScheduler
 {
-    private Mutex mutex;
     private bool terminated;
     private bool dispatching;
-
-    public this ()
-    {
-        this.mutex = new Mutex();
-    }
 
     /***************************************************************************
 
@@ -765,23 +229,6 @@ class FiberScheduler
         if (Fiber.getThis())
             Fiber.yield();
     }
-
-
-    /***************************************************************************
-
-        Returns an appropriate ThreadInfo instance.
-
-        Returns a ThreadInfo instance specific to the calling Fiber if the
-        Fiber was created by this dispatcher, otherwise it returns
-        ThreadInfo.thisInfo.
-
-    ***************************************************************************/
-
-    public @property ref ThreadInfo thisInfo () nothrow
-    {
-        return ThreadInfo.thisInfo;
-    }
-
 
     /***************************************************************************
 
@@ -909,15 +356,10 @@ class FiberScheduler
             op();
         }
 
-        InfoFiber f;
         if (sz == 0)
-            f = new InfoFiber(&wrap);
+            this.m_fibers ~= new InfoFiber(&wrap);
         else
-            f = new InfoFiber(&wrap, sz);
-
-        this.mutex.lock_nothrow();
-        scope(exit) this.mutex.unlock_nothrow();
-        this.m_fibers ~= f;
+            this.m_fibers ~= new InfoFiber(&wrap, sz);
     }
 
 
@@ -1035,6 +477,7 @@ class FiberScheduler
 
         private bool notified;
     }
+
 
     private void dispatch ()
     {
@@ -1209,7 +652,6 @@ public class Channel (T)
                 thisScheduler.wait(new_context.condition);
                 return true;
             }
-
         }
 
         if (thisScheduler !is null)
@@ -1240,7 +682,7 @@ public class Channel (T)
 
     public bool receive (T* msg)
     {
-        bool _receive(T* msg)
+        bool _receive (T* msg)
         {
             this.mutex.lock();
 
@@ -1491,7 +933,7 @@ unittest
 
     assert(result == 4);
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 /// Fiber1 in Thread1 -> [ channel2 ] -> Fiber2 in Thread2 -> [ channel1 ] -> Fiber1 in Thread1
@@ -1532,7 +974,7 @@ unittest
     }
     assert(result == 4);
 
-    cleanupMainThread();
+    thread_joinAll();
 }
 
 // If the queue size is 0, it will block when it is sent and received on the same fiber.
@@ -1580,5 +1022,284 @@ unittest
         });
     });
 
-    cleanupMainThread();
+    thread_joinAll();
+}
+
+/*******************************************************************************
+
+    Encapsulates all implementation-level data needed for scheduling.
+
+    When defining a Scheduler, an instance of this struct must be associated
+    with each logical thread.  It contains all implementation-level information
+    needed by the internal API.
+
+*******************************************************************************/
+
+public struct ThreadInfo
+{
+    Transceiver     transceiver;
+
+    FiberScheduler  scheduler;
+
+    WaitingManager  wmanager;
+
+    int tag;
+
+
+    /***************************************************************************
+
+        Gets a thread-local instance of ThreadInfo.
+
+        Gets a thread-local instance of ThreadInfo, which should be used as the
+        default instance when info is requested for a thread not created by the
+        Scheduler.
+
+    ***************************************************************************/
+
+    static @property ref thisInfo () nothrow
+    {
+        static ThreadInfo val;
+        return val;
+    }
+
+    /***************************************************************************
+
+        Cleans up this ThreadInfo.
+
+        This must be called when a scheduled thread terminates.  It tears down
+        the messaging system for the thread and notifies interested parties of
+        the thread's termination.
+
+        Params:
+            root = The top is a Thread and the fibers exist below it.
+                   Thread is root, if this value is true,
+                   then it is to clean the value that Thread had.
+
+    ***************************************************************************/
+
+    public void cleanup ()
+    {
+    }
+}
+
+
+/// Information of a Current Thread or Fiber
+public @property ref ThreadInfo thisInfo () nothrow
+{
+    return ThreadInfo.thisInfo;
+}
+
+
+/***************************************************************************
+
+    Getter of Transceiver assigned to a called thread.
+
+    Returns:
+        Returns instance of `Transceiver` that is created by top thread.
+
+***************************************************************************/
+
+public @property Transceiver thisTransceiver () nothrow
+{
+    return thisInfo.transceiver;
+}
+
+
+/***************************************************************************
+
+    Setter of Transceiver assigned to a called thread.
+
+    Params:
+        value = The instance of `Transceiver`.
+
+***************************************************************************/
+
+public @property void thisTransceiver (Transceiver value) nothrow
+{
+    thisInfo.transceiver = value;
+}
+
+
+/***************************************************************************
+
+    Getter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property FiberScheduler thisScheduler () nothrow
+{
+    return thisInfo.scheduler;
+}
+
+
+/***************************************************************************
+
+    Setter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisScheduler (FiberScheduler value) nothrow
+{
+    thisInfo.scheduler = value;
+}
+
+
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property WaitingManager thisWaitingManager () nothrow
+{
+    return thisInfo.wmanager;
+}
+
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisWaitingManager (WaitingManager value) nothrow
+{
+    thisInfo.wmanager = value;
+}
+
+
+/*******************************************************************************
+
+    Receve request and response
+    Interfaces to and from data
+
+*******************************************************************************/
+
+public interface Transceiver
+{
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The message to send.
+
+    ***************************************************************************/
+
+    void send (T) (T msg);
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received `Message`
+
+    ***************************************************************************/
+
+    bool receive (T) (T *msg);
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    bool tryReceive (T) (T *msg);
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    void close ();
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    @property bool isClosed ();
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this Transceiver.
+
+    ***************************************************************************/
+
+    void toString (scope void delegate(const(char)[]) sink);
+}
+
+
+/*******************************************************************************
+
+    After making the request, wait until the response comes,
+    and find the response that suits the request.
+
+*******************************************************************************/
+
+public class WaitingManager
+{
+    /// Just a Condition with a state
+    public struct Waiting
+    {
+        Condition c;
+        bool busy;
+    }
+
+    /// Request IDs waiting for a response
+    public Waiting[ulong] waiting;
+
+    protected bool stoped;
+
+    public this ()
+    {
+        this.stoped = false;
+    }
+
+    /// Get the next available request ID
+    public size_t getNextResponseId () @safe nothrow
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id) @safe nothrow
+    {
+        this.waiting.remove(id);
+    }
+
+    /// Returns true if a key value equal to id exists.
+    public bool exist (size_t id) @safe nothrow
+    {
+        return ((id in this.waiting) !is null);
+    }
+
+    ///
+    public void cleanup ()
+    {
+        this.stop();
+        this.waiting.clear();
+    }
+
+    public void stop ()
+    {
+        this.stoped = true;
+    }
 }
