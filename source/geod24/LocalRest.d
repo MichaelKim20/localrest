@@ -79,6 +79,7 @@
 module geod24.LocalRest;
 
 import geod24.concurrency;
+import geod24.variant;
 
 import vibe.data.json;
 
@@ -94,7 +95,7 @@ import std.stdio;
 
 
 /// Data sent by the caller
-public struct Request
+private struct Request
 {
     /// Transceiver of the sender thread
     LocalTransceiver sender;
@@ -113,7 +114,7 @@ public struct Request
 
 
 /// Status of a request
-public enum Status
+private enum Status
 {
     /// Request failed
     Failed,
@@ -130,7 +131,7 @@ public enum Status
 
 
 /// Data sent by the callee back to the caller
-public struct Response
+private struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
@@ -146,7 +147,7 @@ public struct Response
 
 
 /// Filter out requests before they reach a node
-public struct FilterAPI
+private struct FilterAPI
 {
     /// the mangled symbol name of the function to filter
     string func_mangleof;
@@ -157,7 +158,7 @@ public struct FilterAPI
 
 
 /// Ask the node to exhibit a certain behavior for a given time
-public struct TimeCommand
+private struct TimeCommand
 {
     /// For how long our remote node apply this behavior
     Duration dur;
@@ -169,13 +170,13 @@ public struct TimeCommand
 
 
 /// Ask the node to shut down
-public struct ShutdownCommand
+private struct ShutdownCommand
 {
 }
 
 
 /// Status of a request
-public enum MessageType
+private enum MessageType
 {
     request,
     response,
@@ -187,7 +188,7 @@ public enum MessageType
 
 // very simple & limited variant, to keep it performant.
 // should be replaced by a real Variant later
-static struct Message
+private struct Message
 {
     this (Request msg) { this.req = msg; this.tag = MessageType.request; }
     this (Response msg) { this.res = msg; this.tag = MessageType.response; }
@@ -214,7 +215,7 @@ static struct Message
 
 *******************************************************************************/
 
-public class LocalTransceiver : Transceiver
+private class LocalTransceiver : Transceiver
 {
     /// Channel of Request
     public Channel!Message chan;
@@ -331,7 +332,7 @@ public class LocalTransceiver : Transceiver
 
 ***************************************************************************/
 
-public @property LocalTransceiver thisLocalTransceiver () nothrow
+private @property LocalTransceiver thisLocalTransceiver () nothrow
 {
     return cast(LocalTransceiver)thisInfo.transceiver;
 }
@@ -346,13 +347,13 @@ public @property LocalTransceiver thisLocalTransceiver () nothrow
 
 ***************************************************************************/
 
-public @property void thisLocalTransceiver (LocalTransceiver value) nothrow
+private @property void thisLocalTransceiver (LocalTransceiver value) nothrow
 {
-    thisInfo.transceiver = cast(Transceiver)value;
+    thisInfo.transceiver = value;
 }
 
 
-public class LocalWaitingManager : WaitingManager
+private class LocalWaitingManager : WaitingManager
 {
     /// The 'Response' we are currently processing, if any
     public Response pending;
@@ -392,7 +393,6 @@ public class LocalWaitingManager : WaitingManager
                     if (ptr.c.wait(10.msecs))
                         break;
                 }
-
                 if ((period.isNegative) || this.stoped)
                     this.pending = Response(Status.Timeout, id, "");
             }
@@ -416,7 +416,7 @@ public class LocalWaitingManager : WaitingManager
 
 ***************************************************************************/
 
-public @property LocalWaitingManager thisLocalWaitingManager () nothrow
+private @property LocalWaitingManager thisLocalWaitingManager () nothrow
 {
     return cast(LocalWaitingManager)thisInfo.wmanager;
 }
@@ -428,9 +428,9 @@ public @property LocalWaitingManager thisLocalWaitingManager () nothrow
 
 ***************************************************************************/
 
-public @property void thisLocalWaitingManager (LocalWaitingManager value) nothrow
+private @property void thisLocalWaitingManager (LocalWaitingManager value) nothrow
 {
-    thisInfo.wmanager = cast(WaitingManager)value;
+    thisInfo.wmanager = value;
 }
 
 

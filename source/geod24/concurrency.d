@@ -161,7 +161,7 @@ public class ThreadScheduler
 
 *******************************************************************************/
 
-class FiberScheduler
+public class FiberScheduler
 {
     private bool terminated;
     private bool dispatching;
@@ -303,7 +303,7 @@ class FiberScheduler
 
     ***************************************************************************/
 
-    void notify (Condition c)
+    public void notify (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -1037,12 +1037,16 @@ unittest
 
 public struct ThreadInfo
 {
-    Transceiver     transceiver;
+    ///
+    public Transceiver     transceiver;
 
-    FiberScheduler  scheduler;
+    /// Sheduler
+    public FiberScheduler  scheduler;
 
-    WaitingManager  wmanager;
+    ///
+    public WaitingManager  wmanager;
 
+    ///
     int tag;
 
 
