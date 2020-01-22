@@ -372,9 +372,30 @@ public class LocalWaitingManager : WaitingManager
             ptr.busy = true;
 
             if (duration == Duration.init)
-                ptr.c.wait();
+            {
+                while (!this.stoped)
+                {
+                    if (ptr.c.wait(10.msecs))
+                        break;
+                }
+                if (this.stoped)
+                    this.pending = Response(Status.Timeout, id, "");
+            }
             else if (!ptr.c.wait(duration))
-                this.pending = Response(Status.Timeout, id, "");
+            {
+                import core.time : MonoTime;
+                Duration period = duration;
+                for (auto limit = MonoTime.currTime + period;
+                    !period.isNegative && !this.stoped;
+                    period = limit - MonoTime.currTime)
+                {
+                    if (ptr.c.wait(10.msecs))
+                        break;
+                }
+
+                if ((period.isNegative) || this.stoped)
+                    this.pending = Response(Status.Timeout, id, "");
+            }
 
             ptr.busy = false;
 
@@ -386,13 +407,6 @@ public class LocalWaitingManager : WaitingManager
             import std.format;
             assert(0, format("Exception - %s", e.message));
         }
-    }
-    ///
-    override public void cleanup ()
-    {
-        foreach (ref elem; this.waiting)
-            elem.c.notify();
-        this.waiting.clear();
     }
 }
 
@@ -708,7 +722,6 @@ public class RemoteAPI (API) : API
 
                             case MessageType.shutdown_command :
                                 thisLocalWaitingManager.stop();
-                                thisLocalWaitingManager.cleanup();
                                 thisLocalTransceiver.close();
                                 terminate = true;
                                 throw new OwnerTerminate();
@@ -1965,7 +1978,7 @@ unittest
     for (size_t i = 0; i < 10; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(2000.msecs);
+    Thread.sleep(1000.msecs);
     assert(3 == n1.call());
 
     writefln("test07, 5");
