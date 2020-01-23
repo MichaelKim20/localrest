@@ -287,7 +287,7 @@ protected:
         }
 
         if (sz == 0)
-            this.m_fibers ~= new InfoFiber(&wrap, 16 * 1024 * 1024);
+            this.m_fibers ~= new InfoFiber(&wrap);
         else
             this.m_fibers ~= new InfoFiber(&wrap, sz);
     }
