@@ -36,16 +36,12 @@
  */
 module geod24.concurrency;
 
-public import std.variant;
+import std.container;
+import std.range;
 
-import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
-import std.container;
-import std.range.primitives;
-import std.range.interfaces : InputRange;
-import std.traits;
 
 /**
  * Thrown on calls to `receive` if the thread that spawned the receiving
