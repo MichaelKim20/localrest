@@ -216,11 +216,6 @@ private
             }
         }
     }
-
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        return ThreadInfo.thisInfo;
-    }
 }
 
 static ~this()
@@ -968,6 +963,12 @@ class ThreadScheduler
     {
         return new Condition(m);
     }
+}
+
+/// Information of a Current Thread or Fiber
+public @property ref ThreadInfo thisInfo () nothrow
+{
+    return ThreadInfo.thisInfo;
 }
 
 /**
