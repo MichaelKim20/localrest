@@ -250,6 +250,11 @@ class OwnerTerminated : Exception
         super(msg);
         tid = t;
     }
+    ///
+    this(string msg = "Owner terminated") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
 
     Tid tid;
 }
