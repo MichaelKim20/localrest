@@ -1174,8 +1174,8 @@ public @property void thisWaitingManager (WaitingManager value) nothrow
 
 /*******************************************************************************
 
-    Receve request and response
-    Interfaces to and from data
+    Transceiver device required for message exchange between threads.
+    Send and receive data requests, responses, commands, etc.
 
 *******************************************************************************/
 
@@ -1257,53 +1257,68 @@ public interface Transceiver
 
 *******************************************************************************/
 
-public class WaitingManager
+public interface WaitingManager
 {
-    /// Just a Condition with a state
-    public struct Waiting
-    {
-        Condition c;
-        bool busy;
-    }
+    /***************************************************************************
 
-    /// Request IDs waiting for a response
-    public Waiting[ulong] waiting;
+        Get the next available request ID
 
-    protected bool stoped;
+        Returns:
+            request ID
 
-    public this ()
-    {
-        this.stoped = false;
-    }
+    ***************************************************************************/
 
-    /// Get the next available request ID
-    public size_t getNextResponseId () @safe nothrow
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
+    size_t getNextResponseId ();
 
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id) @safe nothrow
-    {
-        this.waiting.remove(id);
-    }
+    /***************************************************************************
 
-    /// Returns true if a key value equal to id exists.
-    public bool exist (size_t id) @safe nothrow
-    {
-        return ((id in this.waiting) !is null);
-    }
+        Called when a waiting condition was handled and can be safely removed
 
-    ///
-    public void cleanup ()
-    {
-        this.stop();
-        this.waiting.clear();
-    }
+        Params:
+            id = request ID
 
-    public void stop ()
-    {
-        this.stoped = true;
-    }
+    ***************************************************************************/
+
+    void remove (size_t id);
+
+
+    /***************************************************************************
+
+        Check that a value such as the request ID already exists.
+
+        Params:
+            id = request ID
+
+        Returns:
+            Returns true if a key value equal to id exists.
+
+    ***************************************************************************/
+
+    bool exist (size_t id);
+
+
+    /***************************************************************************
+
+        Wait for a response.
+        When time out, return the response that means time out.
+
+        Params:
+            id = request ID
+            duration = Maximum time to wait
+
+        Returns:
+            Returns response data.
+
+    ***************************************************************************/
+
+    T waitResponse (T) (size_t id, Duration duration);
+
+
+    /***************************************************************************
+
+        Stop all waiting
+
+    ***************************************************************************/
+
+    void stop ();
 }

@@ -79,7 +79,6 @@
 module geod24.LocalRest;
 
 import geod24.concurrency;
-import geod24.variant;
 
 import vibe.data.json;
 
@@ -90,8 +89,6 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 import core.time;
-
-import std.stdio;
 
 
 /// Data sent by the caller
@@ -127,7 +124,7 @@ private enum Status
 
     /// Request succeeded
     Success
-};
+}
 
 
 /// Data sent by the callee back to the caller
@@ -143,7 +140,7 @@ private struct Response
     /// If `status == Status.Success`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
-};
+}
 
 
 /// Filter out requests before they reach a node
@@ -183,7 +180,7 @@ private enum MessageType
     filter,
     time_command,
     shutdown_command
-};
+}
 
 
 // very simple & limited variant, to keep it performant.
@@ -210,21 +207,24 @@ private struct Message
 
 /*******************************************************************************
 
-    Receve request and response
-    Interfaces to and from data
+    Transceiver device required for message exchange between threads.
+    Send and receive data requests, responses, commands, etc.
 
 *******************************************************************************/
 
 private class LocalTransceiver : Transceiver
 {
+
     /// Channel of Request
     public Channel!Message chan;
+
 
     /// Ctor
     public this () @safe nothrow
     {
         chan = new Channel!Message(64*1024);
     }
+
 
     /***************************************************************************
 
@@ -253,12 +253,9 @@ private class LocalTransceiver : Transceiver
 
     ***************************************************************************/
 
-    public bool receive (T) (T *msg) @trusted
+    public bool receive (Message *msg) @trusted
     {
-        if (is (T == Message))
-            return this.chan.receive(cast(Message*)msg);
-        else
-            assert(0, "Unexpected type of message.");
+        return this.chan.receive(msg);
     }
 
 
@@ -274,12 +271,9 @@ private class LocalTransceiver : Transceiver
 
     ***************************************************************************/
 
-    public bool tryReceive (T) (T *msg) @trusted
+    public bool tryReceive (Message *msg) @trusted
     {
-        if (is (T == Message))
-            return this.chan.tryReceive(msg);
-        else
-            assert(0, "Unexpected type of message.");
+        return this.chan.tryReceive(msg);
     }
 
 
@@ -353,12 +347,110 @@ private @property void thisLocalTransceiver (LocalTransceiver value) nothrow
 }
 
 
+/*******************************************************************************
+
+    After making the request, wait until the response comes,
+    and find the response that suits the request.
+
+*******************************************************************************/
+
 private class LocalWaitingManager : WaitingManager
 {
+    /// Just a Condition with a state
+    public struct Waiting
+    {
+        Condition c;
+        bool busy;
+    }
+
+    /// Request IDs waiting for a response
+    public Waiting[ulong] waiting;
+
     /// The 'Response' we are currently processing, if any
     public Response pending;
 
-    /// Wait for a response.
+    protected bool stoped;
+
+    /// Ctor
+    public this ()
+    {
+        this.stoped = false;
+    }
+
+    /***************************************************************************
+
+        Get the next available request ID
+
+        Returns:
+            request ID
+
+    ***************************************************************************/
+
+    public size_t getNextResponseId () @safe nothrow
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+
+    /***************************************************************************
+
+        Called when a waiting condition was handled and can be safely removed
+
+        Params:
+            id = request ID
+
+    ***************************************************************************/
+
+    public void remove (size_t id) @safe nothrow
+    {
+        this.waiting.remove(id);
+    }
+
+
+    /***************************************************************************
+
+        Check that a value such as the request ID already exists.
+
+        Params:
+            id = request ID
+
+        Returns:
+            Returns true if a key value equal to id exists.
+
+    ***************************************************************************/
+
+    public bool exist (size_t id) @safe nothrow
+    {
+        return ((id in this.waiting) !is null);
+    }
+
+    /***************************************************************************
+
+        Stop all waiting
+
+    ***************************************************************************/
+
+    public void stop ()
+    {
+        this.stoped = true;
+    }
+
+
+    /***************************************************************************
+
+        Wait for a response.
+        When time out, return the response that means time out.
+
+        Params:
+            id = request ID
+            duration = Maximum time to wait
+
+        Returns:
+            Returns response data.
+
+    ***************************************************************************/
+
     public Response waitResponse (size_t id, Duration duration) @trusted nothrow
     {
         try
@@ -791,14 +883,14 @@ public class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-            transceiver = `LocalTransceiver` of the node.
+            transceiver = `Transceiver` of the node.
             timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (LocalTransceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (Transceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this._transceiver = transceiver;
+        this._transceiver = cast(LocalTransceiver)transceiver;
         this._timeout = timeout;
     }
 
@@ -969,9 +1061,6 @@ public class RemoteAPI (API) : API
                 {
                     auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                         .serializeToJsonString();
-
-                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
-                    // this overload needs to be
 
                     auto res = () @trusted
                     {
@@ -1916,6 +2005,7 @@ unittest
     thread_joinAll();
 }
 */
+
 import std.stdio;
 
 // Simulate temporary outage
@@ -1978,7 +2068,7 @@ unittest
     for (size_t i = 0; i < 10; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1000.msecs);
+    Thread.sleep(3000.msecs);
     assert(3 == n1.call());
 
     writefln("test07, 5");
