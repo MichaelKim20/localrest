@@ -935,7 +935,13 @@ class ThreadScheduler
      */
     void spawn(void delegate() op)
     {
-        auto t = new Thread(op);
+        auto t = new Thread({
+            thisScheduler = new FiberScheduler();
+            scope (exit) {
+                thisInfo.cleanup();
+            }
+            op();
+        });
         t.start();
     }
 
