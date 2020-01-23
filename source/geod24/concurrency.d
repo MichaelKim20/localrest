@@ -941,7 +941,7 @@ class FiberScheduler
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
-    void start(void delegate() op)
+    void start(void delegate() op, size_t sz = 0)
     {
         create(op);
         dispatch();
@@ -951,9 +951,9 @@ class FiberScheduler
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
-    void spawn(void delegate() op) nothrow
+    void spawn(void delegate() op, size_t sz = 0) nothrow
     {
-        create(op);
+        create(op, sz);
         FiberScheduler.yield();
     }
 
@@ -1010,7 +1010,7 @@ protected:
      * Params:
      *   op = The delegate the fiber should call
      */
-    void create(void delegate() op) nothrow
+    void create(void delegate() op, size_t sz = 0) nothrow
     {
         void wrap()
         {
@@ -1021,7 +1021,10 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap);
+        if (sz == 0)
+            this.m_fibers ~= new InfoFiber(&wrap, 16 * 1024 * 1024);
+        else
+            this.m_fibers ~= new InfoFiber(&wrap, sz);
     }
 
     /**
@@ -1031,9 +1034,14 @@ protected:
     {
         ThreadInfo info;
 
-        this(void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
+        public this (void delegate () op) nothrow
         {
-            super(op, sz);
+            super(op);
+        }
+
+        public this (void delegate () op, size_t sz) nothrow
+        {
+            super (op, sz);
         }
     }
 
