@@ -43,87 +43,6 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 
-/**
- * Thrown on calls to `receive` if the thread that spawned the receiving
- * thread has terminated and no more messages exist.
- */
-class OwnerTerminated : Exception
-{
-    ///
-    this(string msg = "Owner terminated") @safe pure nothrow @nogc
-    {
-        super(msg);
-    }
-
-}
-
-/**
- * Encapsulates all implementation-level data needed for scheduling.
- *
- * When defining a Scheduler, an instance of this struct must be associated
- * with each logical thread.  It contains all implementation-level information
- * needed by the internal API.
- */
-struct ThreadInfo
-{
-    /// Transceiver device required for message exchange between threads.
-    public Transceiver     transceiver;
-
-    /// Sheduler
-    public FiberScheduler  scheduler;
-
-    /// After making the request, wait until the response comes,
-    public WaitingManager  wmanager;
-
-    /**
-     * Gets a thread-local instance of ThreadInfo.
-     *
-     * Gets a thread-local instance of ThreadInfo, which should be used as the
-     * default instance when info is requested for a thread not created by the
-     * Scheduler.
-     */
-    static @property ref thisInfo() nothrow
-    {
-        static ThreadInfo val;
-        return val;
-    }
-
-    /**
-     * Cleans up this ThreadInfo.
-     *
-     * This must be called when a scheduled thread terminates.  It tears down
-     * the messaging system for the thread and notifies interested parties of
-     * the thread's termination.
-     */
-    void cleanup()
-    {
-    }
-}
-
-
-/***************************************************************************
-
-    Getter of FiberScheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property FiberScheduler thisScheduler () nothrow
-{
-    return thisInfo.scheduler;
-}
-
-
-/***************************************************************************
-
-    Setter of FiberScheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisScheduler (FiberScheduler value) nothrow
-{
-    thisInfo.scheduler = value;
-}
-
 
 /**
  * An example Scheduler using kernel threads.
@@ -133,13 +52,13 @@ public @property void thisScheduler (FiberScheduler value) nothrow
  * and may be instantiated and used, but is not a necessary part of the
  * default functioning of this module.
  */
-class ThreadScheduler
+public class ThreadScheduler
 {
     /**
      * This simply runs op directly, since no real scheduling is needed by
      * this approach.
      */
-    void start(void delegate() op)
+    public void start (void delegate () op)
     {
         op();
     }
@@ -147,7 +66,7 @@ class ThreadScheduler
     /**
      * Creates a new kernel thread and assigns it to run the supplied op.
      */
-    void spawn(void delegate() op)
+    public void spawn (void delegate () op)
     {
         auto t = new Thread({
             thisScheduler = new FiberScheduler();
@@ -163,7 +82,7 @@ class ThreadScheduler
      * Returns ThreadInfo.thisInfo, since it is a thread-local instance of
      * ThreadInfo, which is the correct behavior for this scheduler.
      */
-    @property ref ThreadInfo thisInfo() nothrow
+    public @property ref ThreadInfo thisInfo () nothrow
     {
         return ThreadInfo.thisInfo;
     }
@@ -171,7 +90,7 @@ class ThreadScheduler
     /**
      * Creates a new Condition variable.  No custom behavior is needed here.
      */
-    Condition newCondition(Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         return new Condition(m);
     }
@@ -189,7 +108,7 @@ public @property ref ThreadInfo thisInfo () nothrow
  * This is an example scheduler that creates a new Fiber per call to spawn
  * and multiplexes the execution of all fibers within the main thread.
  */
-class FiberScheduler
+public class FiberScheduler
 {
     private bool terminated;
     private bool dispatching;
@@ -198,16 +117,16 @@ class FiberScheduler
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
-    void start(void delegate() op, size_t sz = 0)
+    public void start (void delegate () op, size_t sz = 0)
     {
-        create(op);
+        create(op, sz);
         dispatch();
     }
 
     /**
     * This commands the scheduler to shut down at the end of the program.
     */
-    void stop()
+    public void stop ()
     {
         terminated = true;
     }
@@ -217,7 +136,7 @@ class FiberScheduler
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
-    void spawn(void delegate() op, size_t sz = 0) nothrow
+    public void spawn (void delegate() op, size_t sz = 0)
     {
         create(op, sz);
         FiberScheduler.yield();
@@ -227,7 +146,7 @@ class FiberScheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    static void yield() nothrow
+    public static void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -243,7 +162,7 @@ class FiberScheduler
      * For the default implementation, `notifyAll`will behave like `notify`.
      *
      */
-    Condition newCondition() nothrow
+    public Condition newCondition () nothrow
     {
         return new FiberCondition();
     }
@@ -255,7 +174,7 @@ protected:
      * Params:
      *   op = The delegate the fiber should call
      */
-    void create(void delegate() op, size_t sz = 0) nothrow
+    protected void create (void delegate() op, size_t sz = 0) nothrow
     {
         void wrap()
         {
@@ -271,7 +190,7 @@ protected:
     /**
      * Fiber which embeds a ThreadInfo
      */
-    static class InfoFiber : Fiber
+    static public class InfoFiber : Fiber
     {
 
         public this (void delegate () op) nothrow
@@ -285,15 +204,15 @@ protected:
         }
     }
 
-    protected class FiberCondition : Condition
+    public class FiberCondition : Condition
     {
-        this() nothrow
+        public this () nothrow
         {
             super(null);
             notified = false;
         }
 
-        override void wait() nothrow
+        public override void wait () nothrow
         {
             scope (exit) notified = false;
 
@@ -301,7 +220,7 @@ protected:
                 FiberScheduler.yield();
         }
 
-        override bool wait(Duration period) nothrow
+        public override bool wait (Duration period) nothrow
         {
             import core.time : MonoTime;
 
@@ -316,13 +235,13 @@ protected:
             return notified;
         }
 
-        override void notify() nothrow
+        public override void notify () nothrow
         {
             notified = true;
             FiberScheduler.yield();
         }
 
-        override void notifyAll() nothrow
+        public override void notifyAll () nothrow
         {
             notified = true;
             FiberScheduler.yield();
@@ -331,8 +250,7 @@ protected:
         private bool notified;
     }
 
-private:
-    void dispatch()
+    private void dispatch ()
     {
         import std.algorithm.mutation : remove;
 
@@ -373,6 +291,19 @@ private:
 private:
     Fiber[] m_fibers;
     size_t m_pos;
+}
+
+/**
+ * Thrown on calls to `receive` if the thread that spawned the receiving
+ * thread has terminated and no more messages exist.
+ */
+public class OwnerTerminated : Exception
+{
+    /// Ctor
+    public this (string msg = "Owner Terminated") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
 }
 
 /*******************************************************************************
@@ -849,6 +780,74 @@ unittest
 
     thread_joinAll();
 }
+
+/**
+ * Encapsulates all implementation-level data needed for scheduling.
+ *
+ * When defining a Scheduler, an instance of this struct must be associated
+ * with each logical thread.  It contains all implementation-level information
+ * needed by the internal API.
+ */
+public struct ThreadInfo
+{
+    /// Transceiver device required for message exchange between threads.
+    public Transceiver     transceiver;
+
+    /// Sheduler
+    public FiberScheduler  scheduler;
+
+    /// After making the request, wait until the response comes,
+    public WaitingManager  wmanager;
+
+    /**
+     * Gets a thread-local instance of ThreadInfo.
+     *
+     * Gets a thread-local instance of ThreadInfo, which should be used as the
+     * default instance when info is requested for a thread not created by the
+     * Scheduler.
+     */
+    public static @property ref thisInfo () nothrow
+    {
+        static ThreadInfo val;
+        return val;
+    }
+
+    /**
+     * Cleans up this ThreadInfo.
+     *
+     * This must be called when a scheduled thread terminates.  It tears down
+     * the messaging system for the thread and notifies interested parties of
+     * the thread's termination.
+     */
+    public void cleanup ()
+    {
+    }
+}
+
+
+/***************************************************************************
+
+    Getter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property FiberScheduler thisScheduler () nothrow
+{
+    return thisInfo.scheduler;
+}
+
+
+/***************************************************************************
+
+    Setter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisScheduler (FiberScheduler value) nothrow
+{
+    thisInfo.scheduler = value;
+}
+
 
 
 
