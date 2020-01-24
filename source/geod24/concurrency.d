@@ -937,6 +937,7 @@ class ThreadScheduler
  */
 class FiberScheduler
 {
+    private bool terminated;
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
@@ -946,6 +947,15 @@ class FiberScheduler
         create(op, sz);
         dispatch();
     }
+
+    /**
+    * This commands the scheduler to shut down at the end of the program.
+    */
+    void stop()
+    {
+        terminated = true;
+    }
+
 
     /**
      * This created a new Fiber for the supplied op and adds it to the
@@ -1106,6 +1116,11 @@ private:
             else if (m_pos++ >= m_fibers.length - 1)
             {
                 m_pos = 0;
+            }
+
+            if (terminated)
+            {
+                break;
             }
         }
     }
