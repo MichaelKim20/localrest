@@ -855,6 +855,9 @@ struct ThreadInfo
     Tid ident;
     Tid owner;
 
+    /// Transceiver device required for message exchange between threads.
+    public Transceiver     transceiver;
+
     /// Sheduler
     public FiberScheduler  scheduler;
 
@@ -2211,4 +2214,112 @@ unittest
             assert(result == 2);
         });
     });
+}
+
+
+
+/***************************************************************************
+
+    Getter of Transceiver assigned to a called thread.
+
+    Returns:
+        Returns instance of `Transceiver` that is created by top thread.
+
+***************************************************************************/
+
+public @property Transceiver thisTransceiver () nothrow
+{
+    return thisInfo.transceiver;
+}
+
+
+/***************************************************************************
+
+    Setter of Transceiver assigned to a called thread.
+
+    Params:
+        value = The instance of `Transceiver`.
+
+***************************************************************************/
+
+public @property void thisTransceiver (Transceiver value) nothrow
+{
+    thisInfo.transceiver = value;
+}
+
+/*******************************************************************************
+
+    Transceiver device required for message exchange between threads.
+    Send and receive data requests, responses, commands, etc.
+
+*******************************************************************************/
+
+public interface Transceiver
+{
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The message to send.
+
+    ***************************************************************************/
+
+    void send (T) (T msg);
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received `Message`
+
+    ***************************************************************************/
+
+    bool receive (T) (T *msg);
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    bool tryReceive (T) (T *msg);
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    void close ();
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    @property bool isClosed ();
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this Transceiver.
+
+    ***************************************************************************/
+
+    void toString (scope void delegate(const(char)[]) sink);
 }
