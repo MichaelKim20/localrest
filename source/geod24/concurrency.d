@@ -861,6 +861,9 @@ struct ThreadInfo
     /// Sheduler
     public FiberScheduler  scheduler;
 
+    /// After making the request, wait until the response comes,
+    public WaitingManager  wmanager;
+
     /**
      * Gets a thread-local instance of ThreadInfo.
      *
@@ -2247,6 +2250,30 @@ public @property void thisTransceiver (Transceiver value) nothrow
     thisInfo.transceiver = value;
 }
 
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property WaitingManager thisWaitingManager () nothrow
+{
+    return thisInfo.wmanager;
+}
+
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisWaitingManager (WaitingManager value) nothrow
+{
+    thisInfo.wmanager = value;
+}
+
+
 /*******************************************************************************
 
     Transceiver device required for message exchange between threads.
@@ -2322,4 +2349,69 @@ public interface Transceiver
     ***************************************************************************/
 
     void toString (scope void delegate(const(char)[]) sink);
+}
+
+
+/*******************************************************************************
+
+    After making the request, wait until the response comes,
+    and find the response that suits the request.
+
+*******************************************************************************/
+
+public interface WaitingManager
+{
+    /***************************************************************************
+
+        Get the next available request ID
+
+        Returns:
+            request ID
+
+    ***************************************************************************/
+
+    size_t getNextResponseId ();
+
+    /***************************************************************************
+
+        Called when a waiting condition was handled and can be safely removed
+
+        Params:
+            id = request ID
+
+    ***************************************************************************/
+
+    void remove (size_t id);
+
+
+    /***************************************************************************
+
+        Check that a value such as the request ID already exists.
+
+        Params:
+            id = request ID
+
+        Returns:
+            Returns true if a key value equal to id exists.
+
+    ***************************************************************************/
+
+    bool exist (size_t id);
+
+
+    /***************************************************************************
+
+        Wait for a response.
+        When time out, return the response that means time out.
+
+        Params:
+            id = request ID
+            duration = Maximum time to wait
+
+        Returns:
+            Returns response data.
+
+    ***************************************************************************/
+
+    T waitResponse (T) (size_t id, Duration duration);
 }
