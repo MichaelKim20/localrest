@@ -114,6 +114,8 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+    /// If this value is true, then when the message is dropped, it transmits the response.
+    bool send_response_msg = true;
 }
 
 /// Ask the node to shut down
@@ -139,6 +141,9 @@ private enum Status
 
     /// Request timed-out
     Timeout,
+
+    /// Request droped
+    Dropped,
 
     /// Request succeeded
     Success
@@ -691,6 +696,7 @@ public class RemoteAPI (API) : API
             Control control;
             Command[] await_req;
             Response[] await_res;
+            Command[] await_drop_req;
             bool terminate = false;
 
             thisScheduler.start({
@@ -713,6 +719,13 @@ public class RemoteAPI (API) : API
                     });
                 }
 
+                void handleDropCmd (Command cmd)
+                {
+                    thisScheduler.spawn({
+                        cmd.sender.send(Response(Status.Dropped, cmd.id));
+                    });
+                }
+
                 void handleRes (Response res)
                 {
                     thisLocalWaitingManager.pending = res;
@@ -732,6 +745,8 @@ public class RemoteAPI (API) : API
                                     handleCmd(msg.cmd);
                                 else if (!control.drop)
                                     await_req ~= msg.cmd;
+                                else if (control.send_response_msg)
+                                    await_drop_req ~= msg.cmd;
                                 break;
 
                             case MessageType.response :
@@ -755,6 +770,7 @@ public class RemoteAPI (API) : API
                             case MessageType.time_command :
                                 control.sleep_until = Clock.currTime + msg.time.dur;
                                 control.drop = msg.time.drop;
+                                control.send_response_msg = msg.time.send_response_msg;
                                 break;
 
                             case MessageType.shutdown_command :
@@ -783,6 +799,13 @@ public class RemoteAPI (API) : API
                             await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
+                        }
+
+                        if (await_drop_req.length > 0)
+                        {
+                            await_drop_req.each!(cmd => handleDropCmd(cmd));
+                            await_drop_req.length = 0;
+                            assumeSafeAppend(await_drop_req);
                         }
                     }
 
@@ -888,12 +911,13 @@ public class RemoteAPI (API) : API
               dropMessages = Whether to process the pending requests when the
                              node come back online (the default), or to drop
                              pending traffic
+              send_drop_msg = Responds that the message was dropped.
 
         ***********************************************************************/
 
-        public void sleep (Duration d, bool dropMessages = false) @trusted
+        public void sleep (Duration d, bool dropMessages = false, bool send_response_msg = true) @trusted
         {
-            this.childTransceiver.send(TimeCommand(d, dropMessages));
+            this.childTransceiver.send(TimeCommand(d, dropMessages, send_response_msg));
         }
 
         /***********************************************************************
@@ -1446,7 +1470,7 @@ unittest
         public this()
         {
             if (n1transceive !is null)
-                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
+                this.remote = new RemoteAPI!API(n1transceive, 5.seconds);
         }
 
         public override ulong call () { return ++this.count; }
@@ -1481,7 +1505,7 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(1.seconds, true);
+    n1.sleep(1.seconds, true, true);
     for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
@@ -1831,7 +1855,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(10.msecs, true, false);
             assertThrown!Exception(node.ping());
         }
     }
