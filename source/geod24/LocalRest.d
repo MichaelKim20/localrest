@@ -180,7 +180,7 @@ private final class LocalScheduler : C.FiberScheduler
     private Waiting[ulong] waiting;
 
     /// Should never be called from outside
-    public override Condition newCondition(Mutex m = null) nothrow
+    public override Condition newCondition() nothrow
     {
         assert(0);
     }
