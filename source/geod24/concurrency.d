@@ -319,7 +319,7 @@ protected:
         }
     }
 
-    protected class FiberCondition : Condition
+    public class FiberCondition : Condition
     {
         /// The mutex with which this condition will be associated.
         private Mutex _mutex;
