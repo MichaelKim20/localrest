@@ -1094,13 +1094,11 @@ protected:
         override void notify() nothrow
         {
             notified = true;
-            FiberScheduler.yield();
         }
 
         override void notifyAll() nothrow
         {
             notified = true;
-            FiberScheduler.yield();
         }
 
 
