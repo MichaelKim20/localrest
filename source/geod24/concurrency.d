@@ -987,7 +987,10 @@ class ThreadScheduler
      */
     void spawn(void delegate() op)
     {
-        auto t = new Thread(op);
+        auto t = new InfoThread({
+            thisScheduler = new FiberScheduler();
+            op();
+        });
         t.start();
     }
 
