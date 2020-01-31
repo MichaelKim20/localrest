@@ -1032,6 +1032,8 @@ protected:
             op();
         }
 
+        this.fibers_lock.lock_nothrow();
+        scope (exit) this.fibers_lock.unlock_nothrow();
         m_fibers ~= new InfoFiber(&wrap);
     }
 
