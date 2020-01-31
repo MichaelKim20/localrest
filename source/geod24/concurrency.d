@@ -1058,6 +1058,9 @@ protected:
         /// The mutex with which this condition will be associated.
         private Mutex _mutex;
 
+        /// When notify() is called, this value is true.
+        private bool _notified;
+
         this (Mutex m = null) nothrow
         {
             super(m);
@@ -1100,7 +1103,49 @@ protected:
             FiberScheduler.yield();
         }
 
-        private bool notified;
+
+        /***********************************************************************
+
+            Getter of `notified`
+            Synchronization is used to access _notified.
+
+        ***********************************************************************/
+
+        private @property bool notified () nothrow
+        {
+            if (this._mutex !is null)
+            {
+                this._mutex.lock_nothrow();
+                scope (exit) this._mutex.unlock_nothrow();
+                return this._notified;
+            }
+            else
+            {
+                return this._notified;
+            }
+        }
+
+
+        /***********************************************************************
+
+            Setter of `notified`
+            Synchronization is used to access _notified.
+
+        ***********************************************************************/
+
+        private @property void notified (bool value) nothrow
+        {
+            if (this._mutex !is null)
+            {
+                this._mutex.lock_nothrow();
+                scope (exit) this._mutex.unlock_nothrow();
+                this._notified = value;
+            }
+            else
+            {
+                this._notified = value;
+            }
+        }
     }
 
 private:
