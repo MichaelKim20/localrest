@@ -937,6 +937,8 @@ class ThreadScheduler
  */
 class FiberScheduler
 {
+    private bool dispatching;
+
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
@@ -946,6 +948,7 @@ class FiberScheduler
         create(op);
         dispatch();
     }
+
 
     /**
      * This created a new Fiber for the supplied op and adds it to the
@@ -1088,6 +1091,11 @@ private:
     {
         import std.algorithm.mutation : remove;
 
+        if (this.dispatching)
+            return;
+
+        this.dispatching = true;
+
         while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
@@ -1105,6 +1113,7 @@ private:
                 m_pos = 0;
             }
         }
+        this.dispatching = false;
     }
 
 private:
