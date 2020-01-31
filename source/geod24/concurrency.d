@@ -216,14 +216,6 @@ private
             }
         }
     }
-
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        if (auto t = cast(InfoThread)Thread.getThis())
-            return t.info;
-        else
-            return ThreadInfo.thisInfo;
-    }
 }
 
 static ~this()
@@ -1011,6 +1003,14 @@ class ThreadScheduler
     {
         return new Condition(m);
     }
+}
+
+public @property ref ThreadInfo thisInfo() nothrow
+{
+    if (auto t = cast(InfoThread)Thread.getThis())
+        return t.info;
+    else
+        return ThreadInfo.thisInfo;
 }
 
 /**
