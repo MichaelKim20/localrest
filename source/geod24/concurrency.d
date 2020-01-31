@@ -939,6 +939,14 @@ class FiberScheduler
 {
     private bool dispatching;
 
+    private Mutex fibers_lock;
+
+    /// Ctor
+    public this () @safe
+    {
+        this.fibers_lock = new Mutex;
+    }
+
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
