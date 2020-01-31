@@ -60,7 +60,7 @@
 
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
-    to the Tid. Messages consist of the sender's Tid, the mangled name
+    to the Transceiver. Messages consist of the sender's Transceiver, the mangled name
     of the function to call (to support overloading) and the arguments,
     serialized as a JSON string.
 
@@ -95,7 +95,7 @@ import core.time;
 /// Data sent by the caller
 private struct Command
 {
-    /// Tid of the sender thread (cannot be JSON serialized)
+    /// Transceiver of the sender thread
     LocalTransceiver sender;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response`
@@ -260,7 +260,8 @@ public final class RemoteAPI (API) : API
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `Tid` per "address".
+        In practice, this means there should only be one `Transceiver`
+        per "address".
 
         Note:
           When the `RemoteAPI` returned by this function is finalized,
