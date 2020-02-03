@@ -42,6 +42,7 @@ import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
+import std.container;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
 import std.traits;
@@ -1836,4 +1837,605 @@ package
     auto self = thisTid();
     self.receiveOnly!(bool);
     assert(x[0] == 5);
+}
+
+
+
+/*******************************************************************************
+
+    This channel has queues that senders and receivers can wait for.
+    With these queues, a single thread alone can exchange data with each other.
+
+    Technically, a channel is a data transmission pipe where data can be passed
+    into or read from.
+    Hence one fiber(thread) can send data into a channel, while other fiber(thread)
+    can read that data from the same channel
+
+    It is the Scheduler that allows the channel to connect the fiber organically.
+    This allows for the segmentation of small units of logic during a program
+    using fiber in a multi-threaded environment.
+
+*******************************************************************************/
+
+public class Channel (T)
+{
+    /// closed
+    private bool closed;
+
+    /// lock for queue and status
+    private Mutex mutex;
+
+    /// size of queue
+    private size_t qsize;
+
+    /// queue of data
+    private DList!T queue;
+
+    /// collection of send waiters
+    private DList!(ChannelContext!T) sendq;
+
+    /// collection of recv waiters
+    private DList!(ChannelContext!T) recvq;
+
+    /// Ctor
+    public this (size_t qsize = 0)
+    {
+        this.closed = false;
+        this.mutex = new Mutex;
+        this.qsize = qsize;
+    }
+
+
+    /***************************************************************************
+
+        Send data `msg`.
+        First, check the receiving waiter that is in the `recvq`.
+        If there are no targets there, add data to the `queue`.
+        If queue is full then stored waiter(fiber) to the `sendq`.
+
+        Params:
+            msg = value to send
+
+        Return:
+            true if the sending is succescontextul, otherwise false
+
+    ***************************************************************************/
+
+    public bool send (T msg)
+    {
+        this.mutex.lock();
+
+        if (this.closed)
+        {
+            this.mutex.unlock();
+            return false;
+        }
+
+        if (this.recvq[].walkLength > 0)
+        {
+            ChannelContext!T context = this.recvq.front;
+            this.recvq.removeFront();
+            *(context.msg_ptr) = msg;
+            this.mutex.unlock();
+            context.notify();
+            return true;
+        }
+
+        if (this.queue[].walkLength < this.qsize)
+        {
+            this.queue.insertBack(msg);
+            this.mutex.unlock();
+            return true;
+        }
+
+        scope scheduler = thisScheduler;
+        if (Fiber.getThis() && scheduler)
+        {
+            ChannelContext!T new_context;
+            new_context.msg_ptr = null;
+            new_context.msg = msg;
+            new_context.mutex = null;
+            new_context.condition = scheduler.newCondition();
+            this.sendq.insertBack(new_context);
+            this.mutex.unlock();
+            new_context.wait();
+            return true;
+        }
+        else
+        {
+            ChannelContext!T new_context;
+            new_context.msg_ptr = null;
+            new_context.msg = msg;
+            new_context.mutex = new Mutex();
+            new_context.condition = new Condition(new_context.mutex);
+            this.sendq.insertBack(new_context);
+            this.mutex.unlock();
+            new_context.wait();
+            return true;
+        }
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Return:
+            msg = value to receive
+
+    ***************************************************************************/
+
+    public bool receive (T* msg)
+    {
+        this.mutex.lock();
+
+        if (this.closed)
+        {
+            (*msg) = T.init;
+            this.mutex.unlock();
+            return false;
+        }
+
+        if (this.sendq[].walkLength > 0)
+        {
+            ChannelContext!T context = this.sendq.front;
+            this.sendq.removeFront();
+            *(msg) = context.msg;
+            this.mutex.unlock();
+            context.notify();
+            return true;
+        }
+
+        if (this.queue[].walkLength > 0)
+        {
+            *(msg) = this.queue.front;
+            this.queue.removeFront();
+            this.mutex.unlock();
+            return true;
+        }
+
+        scope scheduler = thisScheduler;
+        if (Fiber.getThis() && scheduler)
+        {
+            ChannelContext!T new_context;
+            new_context.msg_ptr = msg;
+            new_context.mutex = null;
+            new_context.condition = scheduler.newCondition();
+            this.recvq.insertBack(new_context);
+            this.mutex.unlock();
+            new_context.wait();
+            return true;
+        }
+        else
+        {
+            ChannelContext!T new_context;
+            new_context.msg_ptr = msg;
+            new_context.mutex = new Mutex();
+            new_context.condition = new Condition(new_context.mutex);
+            this.recvq.insertBack(new_context);
+            this.mutex.unlock();
+            new_context.wait();
+            return true;
+        }
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Return:
+            msg = value to receive
+
+    ***************************************************************************/
+
+    public bool tryReceive (T *msg)
+    {
+        this.mutex.lock();
+
+        if (this.closed)
+        {
+            this.mutex.unlock();
+            return false;
+        }
+
+        if (this.sendq[].walkLength > 0)
+        {
+            ChannelContext!T context = this.sendq.front;
+            this.sendq.removeFront();
+            *(msg) = context.msg;
+            this.mutex.unlock();
+            context.notify();
+            return true;
+        }
+
+        if (this.queue[].walkLength > 0)
+        {
+            *(msg) = this.queue.front;
+            this.queue.removeFront();
+            this.mutex.unlock();
+            return true;
+        }
+
+        this.mutex.unlock();
+        return false;
+    }
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    public @property bool isClosed () @safe @nogc pure
+    {
+        synchronized (this.mutex)
+        {
+            return this.closed;
+        }
+    }
+
+
+    /***************************************************************************
+
+        Close Channel
+
+    ***************************************************************************/
+
+    public void close ()
+    {
+        ChannelContext!T context;
+
+        this.mutex.lock();
+        scope (exit) this.mutex.unlock();
+
+        this.closed = true;
+
+        while (true)
+        {
+            if (this.recvq[].walkLength == 0)
+                break;
+
+            context = this.recvq.front;
+            this.recvq.removeFront();
+            context.notify();
+        }
+
+        this.queue.clear();
+
+        while (true)
+        {
+            if (this.sendq[].walkLength == 0)
+                break;
+
+            context = this.sendq.front;
+            this.sendq.removeFront();
+            context.notify();
+        }
+    }
+}
+
+
+/***************************************************************************
+
+    A structure to be stored in a queue.
+    It has information to use in standby.
+
+***************************************************************************/
+
+private struct ChannelContext (T)
+{
+    /// This is a message. Used in put
+    public T  msg;
+
+    /// This is a message point. Used in get
+    public T* msg_ptr;
+
+    //  Waiting Condition
+    public Condition condition;
+
+    /// lock for thread waiting
+    public Mutex mutex;
+}
+
+private void wait (T) (ChannelContext!T context)
+{
+    if (context.condition is null)
+        return;
+
+    if (context.mutex is null)
+        context.condition.wait();
+    else
+    {
+        synchronized(context.mutex)
+        {
+            context.condition.wait();
+        }
+    }
+}
+
+private void notify (T) (ChannelContext!T context)
+{
+    if (context.condition is null)
+        return;
+
+    if (context.mutex is null)
+        context.condition.notify();
+    else
+    {
+        synchronized(context.mutex)
+        {
+            context.condition.notify();
+        }
+    }
+}
+
+
+/// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    auto thread_scheduler = new ThreadScheduler();
+    int result = 0;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    thread_scheduler.spawn({
+        scope scheduler = thisScheduler;
+        scheduler.start({
+            //  Fiber1
+            scheduler.spawn({
+                channel2.send(2);
+                channel1.receive(&result);
+                synchronized (mutex)
+                {
+                    condition.notify;
+                }
+            });
+            //  Fiber2
+            scheduler.spawn({
+                int msg;
+                channel2.receive(&msg);
+                channel1.send(msg*msg);
+            });
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+
+    assert(result == 4);
+}
+
+
+/// Fiber1 in Thread1 -> [ channel2 ] -> Fiber2 in Thread2 -> [ channel1 ] -> Fiber1 in Thread1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    auto thread_scheduler = new ThreadScheduler();
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    thread_scheduler.spawn({
+        // Fiber1
+        thisScheduler.start({
+            channel2.send(2);
+            channel1.receive(&result);
+            synchronized (mutex)
+            {
+                condition.notify;
+            }
+        });
+    });
+
+    // Thread2
+    thread_scheduler.spawn({
+        // Fiber2
+        thisScheduler.start({
+            int msg;
+            channel2.receive(&msg);
+            channel1.send(msg*msg);
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 4);
+}
+
+
+/// Thread1 -> [ channel2 ] -> Thread2 -> [ channel1 ] -> Thread1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    auto thread_scheduler = new ThreadScheduler();
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    thread_scheduler.spawn({
+        channel2.send(2);
+        channel1.receive(&result);
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    // Thread2
+    thread_scheduler.spawn({
+        int msg;
+        channel2.receive(&msg);
+        channel1.send(msg*msg);
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(3000.msecs);
+    }
+
+    assert(result == 4);
+}
+
+
+/// Thread1 -> [ channel2 ] -> Fiber1 in Thread 2 -> [ channel1 ] -> Thread1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    auto thread_scheduler = new ThreadScheduler();
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    thread_scheduler.spawn({
+        channel2.send(2);
+        channel1.receive(&result);
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    // Thread2
+    thread_scheduler.spawn({
+        // Fiber1
+        thisScheduler.start({
+            int msg;
+            channel2.receive(&msg);
+            channel1.send(msg*msg);
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 4);
+}
+
+
+// If the queue size is 0, it will block when it is sent and received on the same thread.
+unittest
+{
+    auto channel_qs0 = new Channel!int(0);
+    auto channel_qs1 = new Channel!int(1);
+    auto thread_scheduler = new ThreadScheduler();
+    int result = 0;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1 - It'll be tangled.
+    thread_scheduler.spawn({
+        channel_qs0.send(2);
+        channel_qs0.receive(&result);
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 0);
+
+    // Thread2 - Unravel a tangle
+    thread_scheduler.spawn({
+        channel_qs0.receive(&result);
+        channel_qs0.send(2);
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 2);
+
+    result = 0;
+    // Thread3 - It'll not be tangled, because queue size is 1
+    thread_scheduler.spawn({
+        channel_qs1.send(2);
+        channel_qs1.receive(&result);
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 2);
+}
+
+
+// If the queue size is 0, it will block when it is sent and received on the same fiber.
+unittest
+{
+    auto channel_qs0 = new Channel!int(0);
+    auto channel_qs1 = new Channel!int(1);
+    auto thread_scheduler = new ThreadScheduler();
+    int result = 0;
+
+    // Thread1
+    thread_scheduler.spawn({
+
+        scope scheduler = thisScheduler;
+        scope cond = scheduler.newCondition();
+
+        scheduler.start({
+            //  Fiber1 - It'll be tangled.
+            scheduler.spawn({
+                channel_qs0.send(2);
+                channel_qs0.receive(&result);
+                cond.notify();
+            });
+
+            assert(!cond.wait(1000.msecs));
+            assert(result == 0);
+
+            //  Fiber2 - Unravel a tangle
+            scheduler.spawn({
+                channel_qs0.receive(&result);
+                channel_qs0.send(2);
+            });
+
+            cond.wait(1000.msecs);
+            assert(result == 2);
+
+            //  Fiber3 - It'll not be tangled, because queue size is 1
+            scheduler.spawn({
+                channel_qs1.send(2);
+                channel_qs1.receive(&result);
+                cond.notify();
+            });
+
+            cond.wait(1000.msecs);
+            assert(result == 2);
+        });
+    });
 }
