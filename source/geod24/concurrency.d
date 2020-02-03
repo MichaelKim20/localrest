@@ -1008,9 +1008,12 @@ class FiberScheduler
      *       If `null`, no `Mutex` will be used and it is assumed that the
      *       `Condition` is only waited on/notified from one `Thread`.
      */
-    Condition newCondition(Mutex m) nothrow
+    Condition newCondition(Mutex m = null) nothrow
     {
-        return new FiberCondition();
+        if (m is null)
+            return new FiberCondition(this.fibers_lock);
+        else
+            return new FiberCondition(m);
     }
 
 protected:
@@ -1051,9 +1054,9 @@ protected:
 
     protected class FiberCondition : Condition
     {
-        this() nothrow
+        this (Mutex m = null) nothrow
         {
-            super(null);
+            super(m);
             notified = false;
         }
 
