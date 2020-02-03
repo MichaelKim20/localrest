@@ -1,39 +1,44 @@
-/**
- * This is a low-level messaging API upon which more structured or restrictive
- * APIs may be built.  The general idea is that every messageable entity is
- * represented by a common handle type called a Tid, which allows messages to
- * be sent to logical threads that are executing in both the current process
- * and in external processes using the same interface.  This is an important
- * aspect of scalability because it allows the components of a program to be
- * spread across available resources with few to no changes to the actual
- * implementation.
- *
- * A logical thread is an execution context that has its own stack and which
- * runs asynchronously to other logical threads.  These may be preemptively
- * scheduled kernel threads, fibers (cooperative user-space threads), or some
- * other concept with similar behavior.
- *
- * The type of concurrency used when logical threads are created is determined
- * by the Scheduler selected at initialization time.  The default behavior is
- * currently to create a new kernel thread per call to spawn, but other
- * schedulers are available that multiplex fibers across the main thread or
- * use some combination of the two approaches.
- *
- * Note:
- * Copied (almost verbatim) from Phobos at commit 3bfccf4f1 (2019-11-27)
- * Changes are this notice, and the module rename, from `std.concurrency`
- * to `geod24.concurrency`.
- *
- * Copyright: Copyright Sean Kelly 2009 - 2014.
- * License:   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
- * Authors:   Sean Kelly, Alex Rønne Petersen, Martin Nowak
- * Source:    $(PHOBOSSRC std/concurrency.d)
- */
-/*          Copyright Sean Kelly 2009 - 2014.
- * Distributed under the Boost Software License, Version 1.0.
- *    (See accompanying file LICENSE_1_0.txt or copy at
- *          http://www.boost.org/LICENSE_1_0.txt)
- */
+/*******************************************************************************
+
+    This is a low-level messaging API upon which more structured or restrictive
+    APIs may be built.  The general idea is that every messageable entity is
+    represented by a common handle type called a Tid, which allows messages to
+    be sent to logical threads that are executing in both the current process
+    and in external processes using the same interface.  This is an important
+    aspect of scalability because it allows the components of a program to be
+    spread across available resources with few to no changes to the actual
+    implementation.
+
+    A logical thread is an execution context that has its own stack and which
+    runs asynchronously to other logical threads.  These may be preemptively
+    scheduled kernel threads, fibers (cooperative user-space threads), or some
+    other concept with similar behavior.
+
+    he type of concurrency used when logical threads are created is determined
+    by the Scheduler selected at initialization time.  The default behavior is
+    currently to create a new kernel thread per call to spawn, but other
+    schedulers are available that multiplex fibers across the main thread or
+    use some combination of the two approaches.
+
+    Note:
+    Copied (almost verbatim) from Phobos at commit 3bfccf4f1 (2019-11-27)
+    Changes are this notice, and the module rename, from `std.concurrency`
+    to `geod24.concurrency`.
+    Removed Tid, spawn
+    Added Channel
+
+    Copyright: Copyright Sean Kelly 2009 - 2014.
+    License:   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
+    Authors:   Sean Kelly, Alex Rønne Petersen, Martin Nowak
+    Source:    $(PHOBOSSRC std/concurrency.d)
+
+    Copyright Sean Kelly 2009 - 2014.
+    Distributed under the Boost Software License, Version 1.0.
+    (See accompanying file LICENSE_1_0.txt or copy at
+    http://www.boost.org/LICENSE_1_0.txt)
+
+*******************************************************************************/
+
 module geod24.concurrency;
 
 import std.container;
@@ -44,13 +49,16 @@ import core.sync.mutex;
 import core.thread;
 
 
-/**
- * Thrown on calls to `receive` if the thread that spawned the receiving
- * thread has terminated and no more messages exist.
- */
+/*******************************************************************************
+
+    Thrown on calls to `receive` if the thread that spawned the receiving
+    thread has terminated and no more messages exist.
+
+*******************************************************************************/
+
 public class OwnerTerminated : Exception
 {
-    ///
+    /// Ctor
     public this (string msg = "Owner terminated") @safe pure nothrow @nogc
     {
         super(msg);
@@ -58,25 +66,31 @@ public class OwnerTerminated : Exception
 }
 
 
-/**
- * Encapsulates all implementation-level data needed for scheduling.
- *
- * When defining a Scheduler, an instance of this struct must be associated
- * with each logical thread.  It contains all implementation-level information
- * needed by the internal API.
- */
+/*******************************************************************************
+
+    Encapsulates all implementation-level data needed for scheduling.
+
+    When defining a Scheduler, an instance of this struct must be associated
+    with each logical thread.  It contains all implementation-level information
+    needed by the internal API.
+
+*******************************************************************************/
+
 public struct ThreadInfo
 {
     /// Storage of information required for scheduling, message passing, etc.
     public Object[string] objects;
 
-    /**
-     * Gets a thread-local instance of ThreadInfo.
-     *
-     * Gets a thread-local instance of ThreadInfo, which should be used as the
-     * default instance when info is requested for a thread not created by the
-     * Scheduler.
-     */
+    /***************************************************************************
+
+        Gets a thread-local instance of ThreadInfo.
+
+        Gets a thread-local instance of ThreadInfo, which should be used as the
+        default instance when info is requested for a thread not created by the
+        Scheduler.
+
+    ***************************************************************************/
+
     public static @property ref thisInfo () nothrow
     {
         static ThreadInfo val;
@@ -158,28 +172,48 @@ public class InfoThread : Thread
 }
 
 
-/**
- * An example Scheduler using kernel threads.
- *
- * This is an example Scheduler that mirrors the default scheduling behavior
- * of creating one kernel thread per call to spawn.  It is fully functional
- * and may be instantiated and used, but is not a necessary part of the
- * default functioning of this module.
- */
+/*******************************************************************************
+
+    An Scheduler using kernel threads.
+
+    This is an example Scheduler that mirrors the default scheduling behavior
+    of creating one kernel thread per call to spawn.  It is fully functional
+    and may be instantiated and used, but is not a necessary part of the
+    default functioning of this module.
+
+*******************************************************************************/
+
 public class ThreadScheduler
 {
-    /**
-     * This simply runs op directly, since no real scheduling is needed by
-     * this approach.
-     */
+
+
+    /***************************************************************************
+
+        This simply runs op directly, since no real scheduling is needed by
+        this approach.
+
+        Params:
+            op = The function to execute. This may be the actual function passed
+                by the user to spawn itself, or may be a wrapper function.
+
+    ***************************************************************************/
+
     public void start (void delegate () op)
     {
         op();
     }
 
-    /**
-     * Creates a new kernel thread and assigns it to run the supplied op.
-     */
+
+    /***************************************************************************
+
+        Creates a new kernel thread and assigns it to run the supplied op.
+
+        Params:
+            op = The function to execute. This may be the actual function passed
+                by the user to spawn itself, or may be a wrapper function.
+
+    ***************************************************************************/
+
     public void spawn (void delegate () op)
     {
         auto t = new InfoThread({
@@ -189,15 +223,20 @@ public class ThreadScheduler
         t.start();
     }
 
-    /**
-     * Creates a new Condition variable.  No custom behavior is needed here.
-     */
+    /***************************************************************************
+
+        Creates a new Condition variable.  No custom behavior is needed here.
+
+    ***************************************************************************/
+
     public Condition newCondition (Mutex m) nothrow
     {
         return new Condition(m);
     }
 }
 
+
+/// Information of a Current Thread or Fiber
 public @property ref ThreadInfo thisInfo () nothrow
 {
     if (auto t = cast(InfoThread)Thread.getThis())
@@ -224,10 +263,18 @@ class FiberScheduler
         this.fibers_lock = new Mutex;
     }
 
-    /**
-     * This creates a new Fiber for the supplied op and then starts the
-     * dispatcher.
-     */
+
+    /***************************************************************************
+
+        This creates a new Fiber for the supplied op and then starts the
+        dispatcher.
+
+        Params:
+            op = The delegate the fiber should call
+            sz = The size of the stack
+
+    ***************************************************************************/
+
     public void start (void delegate () op)
     {
         create(op);
@@ -236,19 +283,38 @@ class FiberScheduler
 
 
     /**
-     * This created a new Fiber for the supplied op and adds it to the
-     * dispatch list.
-     */
+    * This commands the scheduler to shut down at the end of the program.
+    */
+    void stop()
+    {
+        terminated = true;
+    }
+
+
+    /***************************************************************************
+
+        This created a new Fiber for the supplied op and adds it to the
+        dispatch list.
+
+        Params:
+            op = The delegate the fiber should call
+
+    ***************************************************************************/
+
     public void spawn (void delegate() op)
     {
         create(op);
         FiberScheduler.yield();
     }
 
-    /**
-     * If the caller is a scheduled Fiber, this yields execution to another
-     * scheduled Fiber.
-     */
+
+    /***************************************************************************
+
+        If the caller is a scheduled Fiber, this yields execution to another
+        scheduled Fiber.
+
+    ***************************************************************************/
+
     public static void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
@@ -259,18 +325,16 @@ class FiberScheduler
     }
 
 
-    /**
-     * Returns a Condition analog that yields when wait or notify is called.
-     *
-     * Bug:
-     * For the default implementation, `notifyAll`will behave like `notify`.
-     *
-     * Params:
-     *   m = A `Mutex` to use for locking if the condition needs to be waited on
-     *       or notified from multiple `Thread`s.
-     *       If `null`, no `Mutex` will be used and it is assumed that the
-     *       `Condition` is only waited on/notified from one `Thread`.
-     */
+    /***************************************************************************
+
+     Returns a Condition analog that yields when wait or notify is called.
+
+        Bug:
+        For the default implementation, `notifyAll`will behave like `notify`.
+
+
+    ***************************************************************************/
+
     public Condition newCondition (Mutex m = null) nothrow
     {
         if (m is null)
@@ -279,13 +343,17 @@ class FiberScheduler
             return new FiberCondition(m);
     }
 
-protected:
-    /**
-     * Creates a new Fiber which calls the given delegate.
-     *
-     * Params:
-     *   op = The delegate the fiber should call
-     */
+
+    /***************************************************************************
+
+        Creates a new Fiber which calls the given delegate.
+
+        Params:
+            op = The delegate the fiber should call
+            sz = The size of the stack
+
+    ***************************************************************************/
+
     protected void create (void delegate() op) nothrow
     {
         void wrap()
@@ -338,12 +406,16 @@ protected:
     private Fiber[] m_fibers;
     private size_t m_pos;
 
-    /**
-     * Fiber which embeds a ThreadInfo
-     */
+
+    /***************************************************************************
+
+        Fiber which embeds a ThreadInfo
+
+    ***************************************************************************/
+
     static public class InfoFiber : Fiber
     {
-
+        /// Ctor
         public this (void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
         {
             super(op, sz);
@@ -358,12 +430,20 @@ protected:
         /// When notify() is called, this value is true.
         private bool _notified;
 
+        /// Ctor
         public this (Mutex m = null) nothrow
         {
             super(m);
             this._mutex = m;
             this._notified = false;
         }
+
+
+        /***********************************************************************
+
+            Wait until notified.
+
+        ***********************************************************************/
 
         public override void wait () nothrow
         {
@@ -372,6 +452,17 @@ protected:
             while (!this.notified)
                 FiberScheduler.yield();
         }
+
+
+        /***********************************************************************
+
+            Suspends the calling thread until a notification occurs or until
+            the supplied time period has elapsed.
+
+            Params:
+                period = The time to wait.
+
+        ***********************************************************************/
 
         public override bool wait (Duration period) nothrow
         {
@@ -389,10 +480,23 @@ protected:
         }
 
 
+        /***********************************************************************
+
+            Notifies one waiter.
+
+        ***********************************************************************/
+
         public override void notify () nothrow
         {
             this.notified = true;
         }
+
+
+        /***********************************************************************
+
+            Notifies all waiters.
+
+        ***********************************************************************/
 
         public override void notifyAll () nothrow
         {
