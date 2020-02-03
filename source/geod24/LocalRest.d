@@ -179,11 +179,6 @@ private final class LocalScheduler : C.FiberScheduler
     /// Request IDs waiting for a response
     private Waiting[ulong] waiting;
 
-    public this () @safe
-    {
-        super();
-    }
-
     /// Should never be called from outside
     public override Condition newCondition(Mutex m = null) nothrow
     {
