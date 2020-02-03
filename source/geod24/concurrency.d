@@ -307,7 +307,7 @@ protected:
         }
     }
 
-    protected class FiberCondition : Condition
+    public class FiberCondition : Condition
     {
         /// When notify() is called, this value is true.
         private bool _notified;
