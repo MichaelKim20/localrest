@@ -48,10 +48,10 @@ import core.thread;
  * Thrown on calls to `receive` if the thread that spawned the receiving
  * thread has terminated and no more messages exist.
  */
-class OwnerTerminated : Exception
+public class OwnerTerminated : Exception
 {
     ///
-    this(string msg = "Owner terminated") @safe pure nothrow @nogc
+    public this (string msg = "Owner terminated") @safe pure nothrow @nogc
     {
         super(msg);
     }
@@ -65,7 +65,7 @@ class OwnerTerminated : Exception
  * with each logical thread.  It contains all implementation-level information
  * needed by the internal API.
  */
-struct ThreadInfo
+public struct ThreadInfo
 {
     /// Storage of information required for scheduling, message passing, etc.
     public Object[string] objects;
@@ -77,7 +77,7 @@ struct ThreadInfo
      * default instance when info is requested for a thread not created by the
      * Scheduler.
      */
-    static @property ref thisInfo() nothrow
+    public static @property ref thisInfo () nothrow
     {
         static ThreadInfo val;
         return val;
@@ -166,13 +166,13 @@ public class InfoThread : Thread
  * and may be instantiated and used, but is not a necessary part of the
  * default functioning of this module.
  */
-class ThreadScheduler
+public class ThreadScheduler
 {
     /**
      * This simply runs op directly, since no real scheduling is needed by
      * this approach.
      */
-    void start(void delegate() op)
+    public void start (void delegate () op)
     {
         op();
     }
@@ -180,7 +180,7 @@ class ThreadScheduler
     /**
      * Creates a new kernel thread and assigns it to run the supplied op.
      */
-    void spawn(void delegate() op)
+    public void spawn (void delegate () op)
     {
         auto t = new InfoThread({
             thisScheduler = new FiberScheduler();
@@ -192,13 +192,13 @@ class ThreadScheduler
     /**
      * Creates a new Condition variable.  No custom behavior is needed here.
      */
-    Condition newCondition(Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         return new Condition(m);
     }
 }
 
-public @property ref ThreadInfo thisInfo() nothrow
+public @property ref ThreadInfo thisInfo () nothrow
 {
     if (auto t = cast(InfoThread)Thread.getThis())
         return t.info;
@@ -228,7 +228,7 @@ class FiberScheduler
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
-    void start(void delegate() op)
+    public void start (void delegate () op)
     {
         create(op);
         dispatch();
@@ -239,7 +239,7 @@ class FiberScheduler
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
-    void spawn(void delegate() op) nothrow
+    public void spawn (void delegate() op)
     {
         create(op);
         FiberScheduler.yield();
@@ -249,7 +249,7 @@ class FiberScheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    static void yield() nothrow
+    public static void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -271,7 +271,7 @@ class FiberScheduler
      *       If `null`, no `Mutex` will be used and it is assumed that the
      *       `Condition` is only waited on/notified from one `Thread`.
      */
-    Condition newCondition(Mutex m = null) nothrow
+    public Condition newCondition (Mutex m = null) nothrow
     {
         if (m is null)
             return new FiberCondition(this.fibers_lock);
@@ -286,7 +286,7 @@ protected:
      * Params:
      *   op = The delegate the fiber should call
      */
-    void create(void delegate() op) nothrow
+    protected void create (void delegate() op) nothrow
     {
         void wrap()
         {
@@ -298,13 +298,53 @@ protected:
         m_fibers ~= new InfoFiber(&wrap);
     }
 
+
+    private void dispatch ()
+    {
+        import std.algorithm.mutation : remove;
+
+        if (this.dispatching)
+            return;
+
+        this.dispatching = true;
+
+        while (m_fibers.length > 0)
+        {
+            synchronized (this.fibers_lock)
+            {
+                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+                if (t !is null)
+                {
+                    if (cast(OwnerTerminated) t)
+                        break;
+                    else
+                        throw t;
+                }
+
+                if (m_fibers[m_pos].state == Fiber.State.TERM)
+                {
+                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                        m_pos = 0;
+                }
+                else if (m_pos++ >= m_fibers.length - 1)
+                {
+                    m_pos = 0;
+                }
+            }
+        }
+        this.dispatching = false;
+    }
+
+    private Fiber[] m_fibers;
+    private size_t m_pos;
+
     /**
      * Fiber which embeds a ThreadInfo
      */
-    static class InfoFiber : Fiber
+    static public class InfoFiber : Fiber
     {
 
-        this(void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
+        public this (void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
         {
             super(op, sz);
         }
@@ -318,44 +358,45 @@ protected:
         /// When notify() is called, this value is true.
         private bool _notified;
 
-        this (Mutex m = null) nothrow
+        public this (Mutex m = null) nothrow
         {
             super(m);
             this._mutex = m;
-            notified = false;
+            this._notified = false;
         }
 
-        override void wait() nothrow
+        public override void wait () nothrow
         {
-            scope (exit) notified = false;
+            scope (exit) this.notified = false;
 
-            while (!notified)
+            while (!this.notified)
                 FiberScheduler.yield();
         }
 
-        override bool wait(Duration period) nothrow
+        public override bool wait (Duration period) nothrow
         {
             import core.time : MonoTime;
 
-            scope (exit) notified = false;
+            scope (exit) this.notified = false;
 
             for (auto limit = MonoTime.currTime + period;
-                 !notified && !period.isNegative;
-                 period = limit - MonoTime.currTime)
+                    !this.notified && !period.isNegative;
+                    period = limit - MonoTime.currTime)
             {
                 FiberScheduler.yield();
             }
-            return notified;
+            return this.notified;
         }
 
-        override void notify() nothrow
+
+        public override void notify () nothrow
         {
-            notified = true;
+            this.notified = true;
         }
 
-        override void notifyAll() nothrow
+        public override void notifyAll () nothrow
         {
-            notified = true;
+            this.notified = true;
         }
 
 
@@ -402,47 +443,6 @@ protected:
             }
         }
     }
-
-private:
-    void dispatch()
-    {
-        import std.algorithm.mutation : remove;
-
-        if (this.dispatching)
-            return;
-
-        this.dispatching = true;
-
-        while (m_fibers.length > 0)
-        {
-            synchronized (this.fibers_lock)
-            {
-                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-                if (t !is null)
-                {
-                    if (cast(OwnerTerminated) t)
-                        break;
-                    else
-                        throw t;
-                }
-
-                if (m_fibers[m_pos].state == Fiber.State.TERM)
-                {
-                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                        m_pos = 0;
-                }
-                else if (m_pos++ >= m_fibers.length - 1)
-                {
-                    m_pos = 0;
-                }
-            }
-        }
-        this.dispatching = false;
-    }
-
-private:
-    Fiber[] m_fibers;
-    size_t m_pos;
 }
 
 
