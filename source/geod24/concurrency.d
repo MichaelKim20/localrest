@@ -1052,6 +1052,9 @@ protected:
 
     protected class FiberCondition : Condition
     {
+        /// When notify() is called, this value is true.
+        private shared(bool) _notified;
+
         this (Mutex m = null) nothrow
         {
             super(m);
@@ -1093,7 +1096,32 @@ protected:
             FiberScheduler.yield();
         }
 
-        private bool notified;
+
+        /***********************************************************************
+
+            Getter of `notified`
+            Synchronization is used to access _notified.
+
+        ***********************************************************************/
+
+        private @property bool notified () nothrow
+        {
+            return this._notified;
+        }
+
+
+        /***********************************************************************
+
+            Setter of `notified`
+            Synchronization is used to access _notified.
+
+        ***********************************************************************/
+
+        private @property void notified (bool value) nothrow
+        {
+            if (this._notified == value) return;
+            while (!cas(&this._notified, !value, value)) {}
+        }
     }
 
 private:
