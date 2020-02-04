@@ -259,6 +259,7 @@ public @property ref ThreadInfo thisInfo () nothrow
 public class FiberScheduler
 {
     private Mutex fibers_lock;
+    private bool dispatching;
 
     /// Ctor
     public this ()
@@ -364,6 +365,11 @@ public class FiberScheduler
     private void dispatch()
     {
         import std.algorithm.mutation : remove;
+
+        assert(!this.dispatching, "Already called start. Scheduling already started.");
+
+        this.dispatching = true;
+        scope (exit) this.dispatching = false;
 
         while (true)
         {
