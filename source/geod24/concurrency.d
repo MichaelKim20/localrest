@@ -854,6 +854,9 @@ struct ThreadInfo
     Tid ident;
     Tid owner;
 
+    /// Storage of information required for scheduling, message passing, etc.
+    public Object[string] objects;
+
     /**
      * Gets a thread-local instance of ThreadInfo.
      *
