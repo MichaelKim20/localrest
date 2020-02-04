@@ -205,15 +205,6 @@ class ThreadScheduler
     }
 
     /**
-     * Returns ThreadInfo.thisInfo, since it is a thread-local instance of
-     * ThreadInfo, which is the correct behavior for this scheduler.
-     */
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        return ThreadInfo.thisInfo;
-    }
-
-    /**
      * Creates a new Condition variable.  No custom behavior is needed here.
      */
     Condition newCondition(Mutex m) nothrow
