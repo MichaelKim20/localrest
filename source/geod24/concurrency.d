@@ -937,6 +937,14 @@ class ThreadScheduler
  */
 class FiberScheduler
 {
+    private Mutex fibers_lock;
+
+    /// Ctor
+    public this () @safe
+    {
+        this.fibers_lock = new Mutex;
+    }
+
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
@@ -1021,6 +1029,8 @@ protected:
             op();
         }
 
+        this.fibers_lock.lock_nothrow();
+        scope (exit) this.fibers_lock.unlock_nothrow();
         m_fibers ~= new InfoFiber(&wrap);
     }
 
@@ -1088,21 +1098,27 @@ private:
     {
         import std.algorithm.mutation : remove;
 
-        while (m_fibers.length > 0)
+        while (true)
         {
-            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(OwnerTerminated) t))
+            synchronized (this.fibers_lock)
             {
-                throw t;
-            }
-            if (m_fibers[m_pos].state == Fiber.State.TERM)
-            {
-                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                if (m_fibers.length == 0)
+                    break;
+
+                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+                if (t !is null && !(cast(OwnerTerminated) t))
+                {
+                    throw t;
+                }
+                if (m_fibers[m_pos].state == Fiber.State.TERM)
+                {
+                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                        m_pos = 0;
+                }
+                else if (m_pos++ >= m_fibers.length - 1)
+                {
                     m_pos = 0;
-            }
-            else if (m_pos++ >= m_fibers.length - 1)
-            {
-                m_pos = 0;
+                }
             }
         }
     }
