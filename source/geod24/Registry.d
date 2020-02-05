@@ -2,7 +2,7 @@
 
     Registry implementation for multi-threaded access
 
-    This registry allows to look up a `Transceiver` based on a `string`.
+    This registry allows to look up a `MessageChannel` based on a `string`.
     It is extracted from the `std.concurrency` module to make it reusable
 
 *******************************************************************************/
@@ -11,14 +11,14 @@ module geod24.Registry;
 
 import core.sync.mutex;
 import geod24.concurrency;
-import geod24.Transceiver;
+import geod24.LocalRestType;
 
 
 /// Ditto
 public shared struct Registry
 {
-    private Transceiver[string] transceiverByName;
-    private string[][Transceiver] namesByTransceiver;
+    private MessageChannel[string] transceiverByName;
+    private string[][MessageChannel] namesByTransceiver;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -28,21 +28,21 @@ public shared struct Registry
     }
 
     /**
-     * Gets the Transceiver associated with name.
+     * Gets the MessageChannel associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Transceiver or Transceiver.init if name is not registered.
+     *  The associated MessageChannel or MessageChannel.init if name is not registered.
      */
-    Transceiver locate(string name)
+    MessageChannel locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Transceiver)* transceiver = name in this.transceiverByName)
-                return *cast(Transceiver*)transceiver;
-            return Transceiver.init;
+            if (shared(MessageChannel)* transceiver = name in this.transceiverByName)
+                return *cast(MessageChannel*)transceiver;
+            return MessageChannel.init;
         }
     }
 
@@ -61,7 +61,7 @@ public shared struct Registry
      *  true if the name is available and transceiver is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Transceiver transceiver)
+    bool register(string name, MessageChannel transceiver)
     {
         synchronized (registryLock)
         {
@@ -91,9 +91,9 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(Transceiver)* transceiver = name in this.transceiverByName)
+            if (shared(MessageChannel)* transceiver = name in this.transceiverByName)
             {
-                auto allNames = *cast(Transceiver*)transceiver in this.namesByTransceiver;
+                auto allNames = *cast(MessageChannel*)transceiver in this.namesByTransceiver;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
                 this.transceiverByName.remove(name);

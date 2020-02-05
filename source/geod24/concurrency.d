@@ -652,57 +652,58 @@ public class Channel (T)
 
     ***************************************************************************/
 
-    public bool receive (T* msg)
+    public T receive ()
     {
         this.mutex.lock();
 
         if (this.closed)
         {
-            (*msg) = T.init;
             this.mutex.unlock();
-            return false;
+            assert(0, "Channel is closed.");
         }
+
+        T msg;
 
         if (this.sendq[].walkLength > 0)
         {
             ChannelContext!T context = this.sendq.front;
             this.sendq.removeFront();
-            *(msg) = context.msg;
+            msg = context.msg;
             this.mutex.unlock();
             context.notify();
-            return true;
+            return msg;
         }
 
         if (this.queue[].walkLength > 0)
         {
-            *(msg) = this.queue.front;
+            msg = this.queue.front;
             this.queue.removeFront();
             this.mutex.unlock();
-            return true;
+            return msg;
         }
 
         scope scheduler = thisScheduler;
         if (Fiber.getThis() && scheduler)
         {
             ChannelContext!T new_context;
-            new_context.msg_ptr = msg;
+            new_context.msg_ptr = &msg;
             new_context.mutex = null;
             new_context.condition = scheduler.newCondition();
             this.recvq.insertBack(new_context);
             this.mutex.unlock();
             new_context.wait();
-            return true;
+            return msg;
         }
         else
         {
             ChannelContext!T new_context;
-            new_context.msg_ptr = msg;
+            new_context.msg_ptr = &msg;
             new_context.mutex = new Mutex();
             new_context.condition = new Condition(new_context.mutex);
             this.recvq.insertBack(new_context);
             this.mutex.unlock();
             new_context.wait();
-            return true;
+            return msg;
         }
     }
 
@@ -723,7 +724,7 @@ public class Channel (T)
         if (this.closed)
         {
             this.mutex.unlock();
-            return false;
+            assert(0, "Channel is closed.");
         }
 
         if (this.sendq[].walkLength > 0)
@@ -861,7 +862,6 @@ private void notify (T) (ChannelContext!T context)
     }
 }
 
-
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -880,7 +880,7 @@ unittest
             //  Fiber1
             scheduler.spawn({
                 channel2.send(2);
-                channel1.receive(&result);
+                result = channel1.receive();
                 synchronized (mutex)
                 {
                     condition.notify;
@@ -888,8 +888,7 @@ unittest
             });
             //  Fiber2
             scheduler.spawn({
-                int msg;
-                channel2.receive(&msg);
+                int msg = channel2.receive();
                 channel1.send(msg*msg);
             });
         });
@@ -920,7 +919,7 @@ unittest
         // Fiber1
         thisScheduler.start({
             channel2.send(2);
-            channel1.receive(&result);
+            result = channel1.receive();
             synchronized (mutex)
             {
                 condition.notify;
@@ -932,8 +931,7 @@ unittest
     thread_scheduler.spawn({
         // Fiber2
         thisScheduler.start({
-            int msg;
-            channel2.receive(&msg);
+            int msg = channel2.receive();
             channel1.send(msg*msg);
         });
     });
@@ -960,7 +958,7 @@ unittest
     // Thread1
     thread_scheduler.spawn({
         channel2.send(2);
-        channel1.receive(&result);
+        result = channel1.receive();
         synchronized (mutex)
         {
             condition.notify;
@@ -969,8 +967,7 @@ unittest
 
     // Thread2
     thread_scheduler.spawn({
-        int msg;
-        channel2.receive(&msg);
+        int msg = channel2.receive();
         channel1.send(msg*msg);
     });
 
@@ -997,7 +994,7 @@ unittest
     // Thread1
     thread_scheduler.spawn({
         channel2.send(2);
-        channel1.receive(&result);
+        result = channel1.receive();
         synchronized (mutex)
         {
             condition.notify;
@@ -1008,8 +1005,7 @@ unittest
     thread_scheduler.spawn({
         // Fiber1
         thisScheduler.start({
-            int msg;
-            channel2.receive(&msg);
+            int msg = channel2.receive();
             channel1.send(msg*msg);
         });
     });
@@ -1036,7 +1032,7 @@ unittest
     // Thread1 - It'll be tangled.
     thread_scheduler.spawn({
         channel_qs0.send(2);
-        channel_qs0.receive(&result);
+        result = channel_qs0.receive();
         synchronized (mutex)
         {
             condition.notify;
@@ -1051,7 +1047,7 @@ unittest
 
     // Thread2 - Unravel a tangle
     thread_scheduler.spawn({
-        channel_qs0.receive(&result);
+        result = channel_qs0.receive();
         channel_qs0.send(2);
     });
 
@@ -1065,7 +1061,7 @@ unittest
     // Thread3 - It'll not be tangled, because queue size is 1
     thread_scheduler.spawn({
         channel_qs1.send(2);
-        channel_qs1.receive(&result);
+        result = channel_qs1.receive();
         synchronized (mutex)
         {
             condition.notify;
@@ -1098,7 +1094,7 @@ unittest
             //  Fiber1 - It'll be tangled.
             scheduler.spawn({
                 channel_qs0.send(2);
-                channel_qs0.receive(&result);
+                result = channel_qs0.receive();
                 cond.notify();
             });
 
@@ -1107,7 +1103,7 @@ unittest
 
             //  Fiber2 - Unravel a tangle
             scheduler.spawn({
-                channel_qs0.receive(&result);
+                result = channel_qs0.receive();
                 channel_qs0.send(2);
             });
 
@@ -1117,7 +1113,7 @@ unittest
             //  Fiber3 - It'll not be tangled, because queue size is 1
             scheduler.spawn({
                 channel_qs1.send(2);
-                channel_qs1.receive(&result);
+                result = channel_qs1.receive();
                 cond.notify();
             });
 

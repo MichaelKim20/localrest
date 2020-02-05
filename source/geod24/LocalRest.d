@@ -60,7 +60,7 @@
 
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
-    to the Transceiver. Messages consist of the sender's Transceiver, the mangled name
+    to the MessageChannel. Messages consist of the sender's MessageChannel, the mangled name
     of the function to call (to support overloading) and the arguments,
     serialized as a JSON string.
 
@@ -81,7 +81,7 @@ module geod24.LocalRest;
 import vibe.data.json;
 
 import geod24.concurrency;
-import geod24.Transceiver;
+import geod24.LocalRestType;
 
 import std.meta : AliasSeq;
 import std.traits;
@@ -91,73 +91,7 @@ import core.sync.mutex;
 import core.thread;
 import core.time;
 
-
-/// Data sent by the caller
-private struct Command
-{
-    /// Transceiver of the sender thread
-    LocalTransceiver sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
-    /// Method to call
-    string method;
-    /// Arguments to the method, JSON formatted
-    string args;
-}
-
-/// Ask the node to exhibit a certain behavior for a given time
-private struct TimeCommand
-{
-    /// For how long our remote node apply this behavior
-    Duration dur;
-    /// Whether or not affected messages should be dropped
-    bool drop = false;
-}
-
-/// Ask the node to shut down
-private struct ShutdownCommand
-{
-}
-
-/// Filter out requests before they reach a node
-private struct FilterAPI
-{
-    /// the mangled symbol name of the function to filter
-    string func_mangleof;
-
-    /// used for debugging
-    string pretty_func;
-}
-
-/// Status of a request
-private enum Status
-{
-    /// Request failed
-    Failed,
-
-    /// Request timed-out
-    Timeout,
-
-    /// Request succeeded
-    Success
-}
-
-/// Data sent by the callee back to the caller
-private struct Response
-{
-    /// Final status of a request (failed, timeout, success, etc)
-    Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
-    /// Otherwise, it contains `Exception.toString()`.
-    string data;
-}
+private const DefaultQueueSize = 64*1024;
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
@@ -167,39 +101,6 @@ private struct ArgWrapper (T...)
         size_t dummy;
     T args;
 }
-
-// very simple & limited variant, to keep it performant.
-// should be replaced by a real Variant later
-private struct Message
-{
-    this (Command msg) { this.cmd = msg; this.tag = Message.Type.command; }
-    this (Response msg) { this.res = msg; this.tag = Message.Type.response; }
-    this (FilterAPI msg) { this.filter = msg; this.tag = Message.Type.filter; }
-    this (TimeCommand msg) { this.time = msg; this.tag = Message.Type.time_command; }
-    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = Message.Type.shutdown_command; }
-
-    union
-    {
-        Command cmd;
-        Response res;
-        FilterAPI filter;
-        TimeCommand time;
-        ShutdownCommand shutdown;
-    }
-
-    ubyte tag;
-
-    /// Status of a request
-    enum Type
-    {
-        command,
-        response,
-        filter,
-        time_command,
-        shutdown_command
-    }
-}
-
 
 /*******************************************************************************
 
@@ -260,7 +161,7 @@ public final class RemoteAPI (API) : API
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `Transceiver`
+        In practice, this means there should only be one `MessageChannel`
         per "address".
 
         Note:
@@ -282,8 +183,8 @@ public final class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        auto childTransceiver = spawnThread(&spawned!(Impl), args);
-        return new RemoteAPI(childTransceiver, true, timeout);
+        auto childChannel = spawnThread(&spawned!(Impl), args);
+        return new RemoteAPI(childChannel, true, timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -369,7 +270,7 @@ public final class RemoteAPI (API) : API
         Main dispatch function
 
         This function receive string-serialized messages from the calling thread,
-        which is a struct with the sender's LocalTransceiver, the method's mangleof,
+        which is a struct with the sender's MessageChannel, the method's mangleof,
         and the method's arguments as a tuple, serialized to a JSON string.
 
         Params:
@@ -378,7 +279,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void spawned (Implementation) (LocalTransceiver self, CtorParams!Implementation cargs)
+    private static void spawned (Implementation) (MessageChannel self, CtorParams!Implementation cargs)
     {
         import std.container;
         import std.datetime.systime : Clock, SysTime;
@@ -396,7 +297,7 @@ public final class RemoteAPI (API) : API
 
         auto node = new Implementation(cargs);
         auto wmanager = new WaitingManager();
-        scope transceiver = self;
+        scope channel = self;
         scope scheduler = thisScheduler;
 
         thisWaitingManager = wmanager;
@@ -430,7 +331,7 @@ public final class RemoteAPI (API) : API
             while (!terminate)
             {
                 Message msg;
-                if (transceiver.tryReceive(&msg))
+                if (channel.tryReceive(&msg))
                 {
                     switch (msg.tag)
                     {
@@ -498,7 +399,7 @@ public final class RemoteAPI (API) : API
     }
 
     /// A device that can requests.
-    private LocalTransceiver childTransceiver;
+    private MessageChannel childChannel;
 
     /// Whether or not the destructor should destroy the thread
     private bool owner;
@@ -517,20 +418,20 @@ public final class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-            transceiver = `Transceiver` of the node.
+            channel = `MessageChannel` of the node.
             timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (Transceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (MessageChannel channel, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this(transceiver, false, timeout);
+        this(channel, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (Transceiver transceiver, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (MessageChannel channel, bool isOwner, Duration timeout) @nogc pure nothrow
     {
-        this.childTransceiver = cast(LocalTransceiver)transceiver;
+        this.childChannel = cast(MessageChannel)channel;
         this.owner = isOwner;
         this.timeout = timeout;
     }
@@ -554,24 +455,24 @@ public final class RemoteAPI (API) : API
     {
         /***********************************************************************
 
-            Returns the `LocalTransceiver`
+            Returns the `MessageChannel`
 
         ***********************************************************************/
 
-        public LocalTransceiver transceiver () @nogc pure nothrow
+        public MessageChannel channel () @nogc pure nothrow
         {
-            return this.childTransceiver;
+            return this.childChannel;
         }
 
         /***********************************************************************
 
-            Returns the `LocalTransceiver`
+            Returns the `MessageChannel`
 
         ***********************************************************************/
 
-        public LocalTransceiver tid () @nogc pure nothrow
+        public MessageChannel tid () @nogc pure nothrow
         {
-            return this.childTransceiver;
+            return this.childChannel;
         }
 
         /***********************************************************************
@@ -582,7 +483,7 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            this.childTransceiver.send(Message(ShutdownCommand()));
+            this.childChannel.send(Message(ShutdownCommand()));
         }
 
         /***********************************************************************
@@ -603,7 +504,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            this.childTransceiver.send(Message(TimeCommand(d, dropMessages)));
+            this.childChannel.send(Message(TimeCommand(d, dropMessages)));
         }
 
         /***********************************************************************
@@ -684,7 +585,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            this.childTransceiver.send(Message(FilterAPI(mangled, pretty)));
+            this.childChannel.send(Message(FilterAPI(mangled, pretty)));
         }
 
 
@@ -696,7 +597,7 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            this.childTransceiver.send(Message(FilterAPI("")));
+            this.childChannel.send(Message(FilterAPI("")));
         }
     }
 
@@ -729,15 +630,15 @@ public final class RemoteAPI (API) : API
                                 thisWaitingManager = wmanager;
                             }
 
-                            auto transceiver = thisLocalTransceiver;
-                            if (transceiver is null)
+                            auto channel = thisMessageChannel;
+                            if (channel is null)
                             {
-                                transceiver = new LocalTransceiver();
-                                thisLocalTransceiver = transceiver;
+                                channel = new MessageChannel(DefaultQueueSize);
+                                thisMessageChannel = channel;
                             }
 
-                            command = Command(transceiver, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
-                            this.childTransceiver.send(Message(command));
+                            command = Command(channel, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childChannel.send(Message(command));
 
                             res = wmanager.waitResponse(command.id, this.timeout);
                         }
@@ -759,25 +660,25 @@ public final class RemoteAPI (API) : API
                                 thisWaitingManager = wmanager;
                             }
 
-                            auto transceiver = thisLocalTransceiver;
-                            if (transceiver is null)
+                            auto channel = thisMessageChannel;
+                            if (channel is null)
                             {
-                                transceiver = new LocalTransceiver();
-                                thisLocalTransceiver = transceiver;
+                                channel = new MessageChannel(DefaultQueueSize);
+                                thisMessageChannel = channel;
                             }
 
                             bool terminated = false;
-                            command = Command(transceiver, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
+                            command = Command(channel, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             scheduler.spawn({
-                                this.childTransceiver.send(Message(command));
+                                this.childChannel.send(Message(command));
                             });
 
                             scheduler.spawn({
                                 Message msg;
                                 while (!terminated)
                                 {
-                                    if (transceiver.tryReceive(&msg))
+                                    if (channel.tryReceive(&msg))
                                     {
                                         scope c = scheduler.newCondition();
                                         foreach (_; 0..10)
@@ -832,7 +733,7 @@ private
         bool doesIt = false;
         static foreach (T; Types)
         {
-            static if (is(T == Transceiver))
+            static if (is(T == MessageChannel))
             { /* Allowed */ }
             else static if (is(T : Rebindable!R, R))
                 doesIt |= hasLocalAliasing!R;
@@ -862,164 +763,40 @@ private
         }
 
         enum isSpawnable = isCallable!F && is(ReturnType!F == void)
-                && isParamsImplicitlyConvertible!(F, void function(LocalTransceiver, T))
+                && isParamsImplicitlyConvertible!(F, void function(MessageChannel, T))
                 && (isFunctionPointer!F || !hasUnsharedAliasing!F);
     }
 
-    private LocalTransceiver spawnThread(F, T...)(F fn, T args)
+    private MessageChannel spawnThread(F, T...)(F fn, T args)
     if (isSpawnable!(F, T))
     {
         static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
 
         auto thread_scheduler = new ThreadScheduler();
-        auto transceiver = new LocalTransceiver();
+        auto channel = new MessageChannel(DefaultQueueSize);
         thread_scheduler.spawn({
-            thisLocalTransceiver = transceiver;
-            fn(transceiver, args);
+            thisMessageChannel = channel;
+            fn(channel, args);
         });
 
-        return transceiver;
-    }
-}
-
-
-/*******************************************************************************
-
-    Transceiver device required for message exchange between threads.
-    Send and receive data requests, responses, commands, etc.
-
-*******************************************************************************/
-
-private class LocalTransceiver : Transceiver
-{
-
-    /// Channel of Request
-    public Channel!Message chan;
-
-    /// Ctor
-    public this () @safe nothrow
-    {
-        this.chan = new Channel!Message(64*1024);
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts Message
-
-        Params:
-            msg = The `Message` to send.
-
-    ***************************************************************************/
-
-    public void send (T) (T msg) @trusted
-    in
-    {
-        assert(is (T == Message), "Only Message can be used.");
-    }
-    do
-    {
-        this.chan.send(msg);
-    }
-
-
-    /***************************************************************************
-
-        Return the received message.
-
-        Returns:
-            A received `Message`
-
-    ***************************************************************************/
-
-    public bool receive (T) (T *msg) @trusted
-    in
-    {
-        assert(is (T == Message), "Only Message can be used.");
-    }
-    do
-    {
-        return this.chan.receive(msg);
-    }
-
-
-    /***************************************************************************
-
-        Return the received message.
-
-        Params:
-            msg = The `Message` pointer to receive.
-
-        Returns:
-            Returns true when message has been received. Otherwise false
-
-    ***************************************************************************/
-
-    public bool tryReceive (T) (T *msg) @trusted
-    in
-    {
-        assert(is (T == Message), "Only Message can be used.");
-    }
-    do
-    {
-        return this.chan.tryReceive(msg);
-    }
-
-
-    /***************************************************************************
-
-        Close the `Channel`
-
-    ***************************************************************************/
-
-    public void close () @trusted
-    {
-        this.chan.close();
-    }
-
-
-    /***************************************************************************
-
-        Return closing status
-
-        Return:
-            true if channel is closed, otherwise false
-
-    ***************************************************************************/
-
-    public @property bool isClosed () @safe @nogc pure
-    {
-        return false;
-    }
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this LocalTransceiver.
-
-    ***************************************************************************/
-
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "TR(%x)", cast(void*) chan);
+        return channel;
     }
 }
 
 /***************************************************************************
 
-    Getter of LocalTransceiver assigned to a called thread.
+    Getter of MessageChannel assigned to a called thread.
 
     Returns:
-        Returns instance of `LocalTransceiver` that is created by top thread.
+        Returns instance of `MessageChannel` that is created by top thread.
 
 ***************************************************************************/
 
-private @property LocalTransceiver thisLocalTransceiver () nothrow
+private @property MessageChannel thisMessageChannel () nothrow
 {
-    auto p = "transceiver" in thisInfo.objects;
+    auto p = "MessageChannel" in thisInfo.objects;
     if (p !is null)
-        return cast(LocalTransceiver)*p;
+        return cast(MessageChannel)*p;
     else
         return null;
 }
@@ -1027,16 +804,16 @@ private @property LocalTransceiver thisLocalTransceiver () nothrow
 
 /***************************************************************************
 
-    Setter of TransceLocalTransceiveriver assigned to a called thread.
+    Setter of MessageChannel assigned to a called thread.
 
     Params:
-        value = The instance of `LocalTransceiver`.
+        value = The instance of `MessageChannel`.
 
 ***************************************************************************/
 
-private @property void thisLocalTransceiver (LocalTransceiver value) nothrow
+private @property void thisMessageChannel (MessageChannel value) nothrow
 {
-    thisInfo.objects["transceiver"] = value;
+    thisInfo.objects["MessageChannel"] = value;
 }
 
 /***************************************************************************
@@ -1285,9 +1062,9 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto transceiver = registry.locate(name);
-        if (transceiver !is null)
-            return new RemoteAPI!API(transceiver);
+        auto channel = registry.locate(name);
+        if (channel !is null)
+            return new RemoteAPI!API(channel);
 
         switch (type)
         {
@@ -1312,23 +1089,25 @@ unittest
 
     auto scheduler = new ThreadScheduler();
     scheduler.spawn({
-        auto node12 = factory("this does not matter", 1);
-        auto node22 = factory("neither does this", 2);
+        thisScheduler.start({
+            auto node12 = factory("this does not matter", 1);
+            auto node22 = factory("neither does this", 2);
 
-        assert(node12.pubkey() == 42);
-        assert(node12.last() == "pubkey");
-        assert(node22.pubkey() == 0);
-        assert(node22.last() == "pubkey");
+            assert(node12.pubkey() == 42);
+            assert(node12.last() == "pubkey");
+            assert(node22.pubkey() == 0);
+            assert(node22.last() == "pubkey");
 
-        node12.recv(42, Json.init);
-        assert(node12.last() == "recv@2");
-        node12.recv(Json.init);
-        assert(node12.last() == "recv@1");
-        assert(node22.last() == "pubkey");
+            node12.recv(42, Json.init);
+            assert(node12.last() == "recv@2");
+            node12.recv(Json.init);
+            assert(node12.last() == "recv@1");
+            assert(node22.last() == "pubkey");
 
-        synchronized (mutex) {
-            condition.notify;
-        }
+            synchronized (mutex) {
+                condition.notify;
+            }
+        });
     });
 
     synchronized (mutex) {
@@ -1371,9 +1150,9 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(Transceiver masterTransceiver)
+        this(MessageChannel masterChannel)
         {
-            this.master = new RemoteAPI!API(masterTransceiver);
+            this.master = new RemoteAPI!API(masterChannel);
         }
 
         public override @property ulong requests()
@@ -1424,7 +1203,7 @@ unittest
     import geod24.concurrency;
     import std.format;
 
-    __gshared Transceiver[string] tbn;
+    __gshared MessageChannel[string] tbn;
 
     static interface API
     {
@@ -1562,7 +1341,7 @@ unittest
 unittest
 {
     import std.exception;
-    __gshared Transceiver n1transceive;
+    __gshared MessageChannel n1transceive;
 
     static interface API
     {
@@ -1632,7 +1411,7 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared Transceiver node_tid;
+    __gshared MessageChannel node_tid;
 
     static interface API
     {
@@ -1857,7 +1636,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_channel;
 
     static interface API
     {
@@ -1871,7 +1650,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
+            auto node = new RemoteAPI!API(node_channel, 500.msecs);
 
             // no time-out
             node.ctrl.sleep(10.msecs);
@@ -1885,7 +1664,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_channel = node_2.ctrl.tid();
     node_1.check();
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
@@ -1898,7 +1677,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_channel;
 
     static interface API
     {
@@ -1914,7 +1693,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
+            auto node = new RemoteAPI!API(node_channel, 500.msecs);
 
             // time-out
             node.ctrl.sleep(2000.msecs);
@@ -1928,7 +1707,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_channel = node_2.ctrl.tid();
     node_1.check();
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
@@ -1941,7 +1720,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_channel;
 
     static interface API
     {
@@ -1955,7 +1734,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 420.msecs);
+            auto node = new RemoteAPI!API(node_channel, 420.msecs);
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
@@ -1966,7 +1745,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_channel = node_2.ctrl.tid();
     node_1.check();
     Thread.sleep(1000.msecs);
     node_1.ctrl.shutdown();
@@ -1979,7 +1758,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_channel;
 
     static interface API
     {
@@ -1993,7 +1772,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 5000.msecs);
+            auto node = new RemoteAPI!API(node_channel, 5000.msecs);
             assert(node.ping() == 42);
             // We need to return immediately so that the main thread
             // puts us to sleep
@@ -2006,7 +1785,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_channel = node_2.ctrl.tid();
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
@@ -2051,7 +1830,7 @@ unittest
 {
     import core.thread : thread_joinAll;
     static import geod24.concurrency;
-    __gshared Transceiver node_tid;
+    __gshared MessageChannel node_tid;
 
     static interface API
     {
