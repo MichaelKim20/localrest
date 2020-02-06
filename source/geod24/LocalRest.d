@@ -201,10 +201,6 @@ private struct Message
 }
 
 
-/// Whether this is the main thread
-private bool is_main_thread;
-
-
 /*******************************************************************************
 
     Provide eventloop-like functionalities
