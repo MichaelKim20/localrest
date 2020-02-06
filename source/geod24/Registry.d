@@ -17,8 +17,8 @@ import geod24.LocalRestType;
 /// Ditto
 public shared struct Registry
 {
-    private MessageChannel[string] transceiverByName;
-    private string[][MessageChannel] namesByTransceiver;
+    private MessageChannel[string] channelByName;
+    private string[][MessageChannel] namesBychannel;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -40,43 +40,43 @@ public shared struct Registry
     {
         synchronized (registryLock)
         {
-            if (shared(MessageChannel)* transceiver = name in this.transceiverByName)
-                return *cast(MessageChannel*)transceiver;
+            if (shared(MessageChannel)* channel = name in this.channelByName)
+                return *cast(MessageChannel*)channel;
             return MessageChannel.init;
         }
     }
 
     /**
-     * Associates name with transceiver.
+     * Associates name with channel.
      *
-     * Associates name with transceiver in a process-local map.  When the thread
-     * represented by transceiver terminates, any names associated with it will be
+     * Associates name with channel in a process-local map.  When the thread
+     * represented by channel terminates, any names associated with it will be
      * automatically unregistered.
      *
      * Params:
-     *  name = The name to associate with transceiver.
-     *  transceiver  = The transceiver register by name.
+     *  name = The name to associate with channel.
+     *  channel  = The channel register by name.
      *
      * Returns:
-     *  true if the name is available and transceiver is not known to represent a
+     *  true if the name is available and channel is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, MessageChannel transceiver)
+    bool register(string name, MessageChannel channel)
     {
         synchronized (registryLock)
         {
-            if (name in transceiverByName)
+            if (name in channelByName)
                 return false;
-            if (transceiver.isClosed)
+            if (channel.isClosed)
                 return false;
-            this.namesByTransceiver[transceiver] ~= name;
-            this.transceiverByName[name] = cast(shared)transceiver;
+            this.namesBychannel[channel] ~= name;
+            this.channelByName[name] = cast(shared)channel;
             return true;
         }
     }
 
     /**
-     * Removes the registered name associated with a transceiver.
+     * Removes the registered name associated with a channel.
      *
      * Params:
      *  name = The name to unregister.
@@ -91,12 +91,12 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(MessageChannel)* transceiver = name in this.transceiverByName)
+            if (shared(MessageChannel)* channel = name in this.channelByName)
             {
-                auto allNames = *cast(MessageChannel*)transceiver in this.namesByTransceiver;
+                auto allNames = *cast(MessageChannel*)channel in this.namesBychannel;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.transceiverByName.remove(name);
+                this.channelByName.remove(name);
                 return true;
             }
             return false;
