@@ -218,7 +218,7 @@ class FiberScheduler
     private Mutex fibers_lock;
 
     /// Ctor
-    public this () @safe
+    public this ()
     {
         this.fibers_lock = new Mutex;
     }
