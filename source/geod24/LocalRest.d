@@ -80,10 +80,14 @@ module geod24.LocalRest;
 
 import vibe.data.json;
 
-static import C = geod24.concurrency;
-import std.meta : AliasSeq;
-import std.traits : Parameters, ReturnType;
+import geod24.concurrency;
+import geod24.Transceiver;
 
+import std.meta : AliasSeq;
+import std.traits;
+
+import core.sync.condition;
+import core.sync.mutex;
 import core.thread;
 import core.time;
 
@@ -92,7 +96,7 @@ import core.time;
 private struct Command
 {
     /// Tid of the sender thread (cannot be JSON serialized)
-    C.Tid sender;
+    LocalTransceiver sender;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response`
     /// Initialized to `size_t.max` so not setting it crashes the program
@@ -164,8 +168,40 @@ private struct ArgWrapper (T...)
     T args;
 }
 
+// very simple & limited variant, to keep it performant.
+// should be replaced by a real Variant later
+private struct Message
+{
+    this (Command msg) { this.cmd = msg; this.tag = Message.Type.command; }
+    this (Response msg) { this.res = msg; this.tag = Message.Type.response; }
+    this (FilterAPI msg) { this.filter = msg; this.tag = Message.Type.filter; }
+    this (TimeCommand msg) { this.time = msg; this.tag = Message.Type.time_command; }
+    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = Message.Type.shutdown_command; }
+
+    union
+    {
+        Command cmd;
+        Response res;
+        FilterAPI filter;
+        TimeCommand time;
+        ShutdownCommand shutdown;
+    }
+
+    ubyte tag;
+
+    /// Status of a request
+    enum Type
+    {
+        command,
+        response,
+        filter,
+        time_command,
+        shutdown_command
+    }
+}
+
 /// Our own little scheduler
-private final class LocalScheduler : C.FiberScheduler
+private final class LocalScheduler : FiberScheduler
 {
     import core.sync.condition;
     import core.sync.mutex;
@@ -251,6 +287,7 @@ private bool is_main_thread;
 
 public void runTask (scope void delegate() dg)
 {
+    scope scheduler = thisScheduler;
     assert(scheduler !is null, "Cannot call this function from the main thread");
     scheduler.spawn(dg);
 }
@@ -258,11 +295,11 @@ public void runTask (scope void delegate() dg)
 /// Ditto
 public void sleep (Duration timeout)
 {
+    scope scheduler = thisScheduler;
     assert(scheduler !is null, "Cannot call this function from the main thread");
-    scope cond = scheduler.new FiberCondition();
+    scope cond = scheduler.newCondition();
     cond.wait(timeout);
 }
-
 
 /*******************************************************************************
 
@@ -310,8 +347,8 @@ public final class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        auto childTid = C.spawn(&spawned!(Impl), args);
-        return new RemoteAPI(childTid, true, timeout);
+        auto childTransceiver = spawnThread(&spawned!(Impl), args);
+        return new RemoteAPI(childTransceiver, true, timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -355,8 +392,8 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            C.send(cmd.sender, Response(Status.Failed, cmd.id,
-                                format("Filtered method '%%s'", filter.pretty_func)));
+                            cmd.sender.send(Message(Response(Status.Failed, cmd.id,
+                                format("Filtered method '%%s'", filter.pretty_func))));
                             return;
                         }
 
@@ -364,22 +401,24 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            C.send(cmd.sender,
-                                Response(
+                            cmd.sender.send(
+                                Message(Response(
                                     Status.Success,
                                     cmd.id,
-                                    node.%1$s(args.args).serializeToJsonString()));
+                                    node.%1$s(args.args).serializeToJsonString()
+                                ))
+                            );
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(Status.Success, cmd.id));
+                            cmd.sender.send(Message(Response(Status.Success, cmd.id)));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        cmd.sender.send(Message(Response(Status.Failed, cmd.id, t.toString())));
                     }
 
                     return;
@@ -394,122 +433,137 @@ public final class RemoteAPI (API) : API
 
         Main dispatch function
 
-       This function receive string-serialized messages from the calling thread,
-       which is a struct with the sender's Tid, the method's mangleof,
-       and the method's arguments as a tuple, serialized to a JSON string.
+        This function receive string-serialized messages from the calling thread,
+        which is a struct with the sender's LocalTransceiver, the method's mangleof,
+        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `geod24.concurrency.receive` is not `@safe`, so neither is this.
-
-       Params:
-           Implementation = Type of the implementation to instantiate
-           args = Arguments to `Implementation`'s constructor
+        Params:
+            Implementation = Type of the implementation to instantiate
+            args = Arguments to `Implementation`'s constructor
 
     ***************************************************************************/
 
-    private static void spawned (Implementation) (C.Tid self, CtorParams!Implementation cargs)
+    private static void spawned (Implementation) (LocalTransceiver self, CtorParams!Implementation cargs)
     {
+        import std.container;
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
 
-        scope node = new Implementation(cargs);
-        scheduler = new LocalScheduler;
-        scope exc = new Exception("You should never see this exception - please report a bug");
-
-        // very simple & limited variant, to keep it performant.
-        // should be replaced by a real Variant later
-        static struct Variant
-        {
-            this (Response res) { this.res = res; this.tag = 0; }
-            this (Command cmd) { this.cmd = cmd; this.tag = 1; }
-
-            union
-            {
-                Response res;
-                Command cmd;
-            }
-
-            ubyte tag;
-        }
-
         // used for controling filtering / sleep
         struct Control
         {
-            FilterAPI filter;    // filter specific messages
-            SysTime sleep_until; // sleep until this time
-            bool drop;           // drop messages if sleeping
+            FilterAPI filter;        // filter specific messages
+            SysTime sleep_until;     // sleep until this time
+            bool drop;               // drop messages if sleeping
+            bool send_response_msg;  // send drop message
         }
 
+        auto node = new Implementation(cargs);
+        auto wmanager = new WaitingManager();
+        scope transceiver = self;
+        scope scheduler = thisScheduler;
+
+        thisWaitingManager = wmanager;
+        thisNodeThread = true;
         Control control;
+        Message[] await_msg;
+        bool terminate = false;
 
-        bool isSleeping()
-        {
-            return control.sleep_until != SysTime.init
-                && Clock.currTime < control.sleep_until;
-        }
+        scheduler.start({
 
-        void handle (T)(T arg)
-        {
-            static if (is(T == Command))
+            bool isSleeping ()
             {
-                scheduler.spawn(() => handleCommand(arg, node, control.filter));
+                return control.sleep_until != SysTime.init
+                    && Clock.currTime < control.sleep_until;
             }
-            else static if (is(T == Response))
+
+            void handleCmd (Command cmd)
             {
-                scheduler.pending = arg;
-                scheduler.waiting[arg.id].c.notify();
-                scheduler.remove(arg.id);
+                scheduler.spawn({
+                    handleCommand(cmd, node, control.filter);
+                });
             }
-            else static assert(0, "Unhandled type: " ~ T.stringof);
-        }
 
-        // we need to keep track of messages which were ignored when
-        // node.sleep() was used, and then handle each message in sequence.
-        Variant[] await_msgs;
+            void handleRes (Response res)
+            {
+                wmanager.pending = res;
+                wmanager.waiting[res.id].c.notify();
+                wmanager.remove(res.id);
+            }
 
-        try scheduler.start(() {
-                while (1)
+            while (!terminate)
+            {
+                Message msg;
+                if (transceiver.tryReceive(&msg))
                 {
-                    C.receiveTimeout(C.thisTid(), 10.msecs,
-                        (C.OwnerTerminated e) { throw exc; },
-                        (ShutdownCommand e) { throw exc; },
-                        (TimeCommand s)      {
-                            control.sleep_until = Clock.currTime + s.dur;
-                            control.drop = s.drop;
-                        },
-                        (FilterAPI filter_api) {
-                            control.filter = filter_api;
-                        },
-                        (Response res) {
-                            if (!isSleeping())
-                                handle(res);
-                            else if (!control.drop)
-                                await_msgs ~= Variant(res);
-                        },
-                        (Command cmd)
-                        {
-                            if (!isSleeping())
-                                handle(cmd);
-                            else if (!control.drop)
-                                await_msgs ~= Variant(cmd);
-                        });
-
-                    // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
+                    switch (msg.tag)
                     {
-                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
-                        await_msgs.length = 0;
-                        assumeSafeAppend(await_msgs);
+                        case Message.Type.command :
+                            if (!isSleeping())
+                                handleCmd(msg.cmd);
+                            else if (!control.drop)
+                                await_msg ~= Message(msg.cmd);
+                            break;
+
+                        case Message.Type.response :
+                            auto c = scheduler.newCondition();
+                            foreach (_; 0..10)
+                            {
+                                if (wmanager.exist(msg.res.id))
+                                    break;
+                                c.wait(10.msecs);
+                            }
+                            if (!isSleeping())
+                                handleRes(msg.res);
+                            else if (!control.drop)
+                                await_msg ~= Message(msg.res);
+                            break;
+
+                        case Message.Type.filter :
+                            control.filter = msg.filter;
+                            break;
+
+                        case Message.Type.time_command :
+                            control.sleep_until = Clock.currTime + msg.time.dur;
+                            control.drop = msg.time.drop;
+                            break;
+
+                        case Message.Type.shutdown_command :
+                            terminate = true;
+                            throw new OwnerTerminated();
+
+                        default :
+                            assert(0, "Unexpected type: " ~ msg.tag);
                     }
                 }
-            });
-        catch (Exception e)
-            if (e !is exc)
-                throw e;
+
+                scheduler.yield();
+
+                if (!isSleeping())
+                {
+                    if (await_msg.length > 0)
+                    {
+                        await_msg.each!(
+                            (msg) {
+                                if (msg.tag == Message.Type.command)
+                                    handleCmd(msg.cmd);
+                                if (msg.tag == Message.Type.response)
+                                    handleRes(msg.res);
+                            }
+                        );
+                        await_msg.length = 0;
+                        assumeSafeAppend(await_msg);
+                    }
+                }
+
+                scheduler.yield();
+            }
+        });
     }
 
-    /// Where to send message to
-    private C.Tid childTid;
+    /// A device that can requests.
+    private LocalTransceiver childTransceiver;
 
     /// Whether or not the destructor should destroy the thread
     private bool owner;
@@ -528,24 +582,24 @@ public final class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-          tid = `geod24.concurrency.Tid` of the node.
-                This can usually be obtained by `geod24.concurrency.locate`.
-          timeout = any timeout to use
+            transceiver = `Transceiver` of the node.
+            timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (Transceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this(tid, false, timeout);
+        this(transceiver, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (Transceiver transceiver, bool isOwner, Duration timeout) @nogc pure nothrow
     {
-        this.childTid = tid;
+        this.childTransceiver = cast(LocalTransceiver)transceiver;
         this.owner = isOwner;
         this.timeout = timeout;
     }
+
 
     /***************************************************************************
 
@@ -565,17 +619,24 @@ public final class RemoteAPI (API) : API
     {
         /***********************************************************************
 
-            Returns the `Tid` this `RemoteAPI` wraps
-
-            This can be useful for calling `geod24.concurrency.register` or similar.
-            Note that the `Tid` should not be used directly, as our event loop,
-            would error out on an unknown message.
+            Returns the `LocalTransceiver`
 
         ***********************************************************************/
 
-        public C.Tid tid () @nogc pure nothrow
+        public LocalTransceiver transceiver () @nogc pure nothrow
         {
-            return this.childTid;
+            return this.childTransceiver;
+        }
+
+        /***********************************************************************
+
+            Returns the `LocalTransceiver`
+
+        ***********************************************************************/
+
+        public LocalTransceiver tid () @nogc pure nothrow
+        {
+            return this.childTransceiver;
         }
 
         /***********************************************************************
@@ -586,7 +647,7 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
+            this.childTransceiver.send(Message(ShutdownCommand()));
         }
 
         /***********************************************************************
@@ -607,7 +668,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            C.send(this.childTid, TimeCommand(d, dropMessages));
+            this.childTransceiver.send(Message(TimeCommand(d, dropMessages)));
         }
 
         /***********************************************************************
@@ -688,7 +749,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            C.send(this.childTid, FilterAPI(mangled, pretty));
+            this.childTransceiver.send(Message(FilterAPI(mangled, pretty)));
         }
 
 
@@ -700,7 +761,7 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            C.send(this.childTid, FilterAPI(""));
+            this.childTransceiver.send(Message(FilterAPI("")));
         }
     }
 
@@ -716,52 +777,102 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
-                    // we are in the main thread
-                    if (scheduler is null)
-                    {
-                        scheduler = new LocalScheduler;
-                        is_main_thread = true;
-                    }
-
-                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
-                    // this overload needs to be
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
-                        auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                        C.send(this.childTid, command);
+                        Command command;
+                        Response res;
 
-                        // for the main thread, we run the "event loop" until
-                        // the request we're interested in receives a response.
-                        if (is_main_thread)
+                        // from Node to Node
+                        if (thisNodeThread)
                         {
+                            auto wmanager = thisWaitingManager;
+                            if (wmanager is null)
+                            {
+                                wmanager = new WaitingManager();
+                                thisWaitingManager = wmanager;
+                            }
+
+                            auto transceiver = thisLocalTransceiver;
+                            if (transceiver is null)
+                            {
+                                transceiver = new LocalTransceiver();
+                                thisLocalTransceiver = transceiver;
+                            }
+
+                            command = Command(transceiver, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childTransceiver.send(Message(command));
+
+                            res = wmanager.waitResponse(command.id, this.timeout);
+                        }
+
+                        // from Non-Node to Node
+                        else
+                        {
+                            auto scheduler = thisScheduler;
+                            if (scheduler is null)
+                            {
+                                scheduler = new FiberScheduler();
+                                thisScheduler = scheduler;
+                            }
+
+                            auto wmanager = thisWaitingManager;
+                            if (wmanager is null)
+                            {
+                                wmanager = new WaitingManager();
+                                thisWaitingManager = wmanager;
+                            }
+
+                            auto transceiver = thisLocalTransceiver;
+                            if (transceiver is null)
+                            {
+                                transceiver = new LocalTransceiver();
+                                thisLocalTransceiver = transceiver;
+                            }
+
                             bool terminated = false;
-                            runTask(() {
+                            command = Command(transceiver, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
+
+                            scheduler.spawn({
+                                this.childTransceiver.send(Message(command));
+                            });
+
+                            scheduler.spawn({
+                                Message msg;
                                 while (!terminated)
                                 {
-                                    C.receiveTimeout(C.thisTid(), 10.msecs,
-                                        (Response res) {
-                                            scheduler.pending = res;
-                                            scheduler.waiting[res.id].c.notify();
-                                        });
+                                    if (transceiver.tryReceive(&msg))
+                                    {
+                                        scope c = scheduler.newCondition();
+                                        foreach (_; 0..10)
+                                        {
+                                            if (wmanager.exist(msg.res.id))
+                                                break;
+                                            c.wait(1.msecs);
+                                        }
 
+                                        if (wmanager.exist(msg.res.id))
+                                        {
+                                            wmanager.pending = msg.res;
+                                            wmanager.waiting[msg.res.id].c.notify();
+                                            wmanager.remove(res.id);
+                                        }
+
+                                        if (msg.res.id == command.id)
+                                            break;
+                                    }
                                     scheduler.yield();
                                 }
                             });
 
-                            Response res;
-                            scheduler.start(() {
-                                res = scheduler.waitResponse(command.id, this.timeout);
+                            scheduler.start({
+                                res = wmanager.waitResponse(command.id, this.timeout);
                                 terminated = true;
                             });
-                            return res;
                         }
-                        else
-                        {
-                            return scheduler.waitResponse(command.id, this.timeout);
-                        }
-                    }();
+                        return res;
+                    } ();
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -772,8 +883,393 @@ public final class RemoteAPI (API) : API
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
                 }
-                });
+            });
         }
+}
+
+private
+{
+    bool hasLocalAliasing(Types...)()
+    {
+        import std.typecons : Rebindable;
+
+        // Works around "statement is not reachable"
+        bool doesIt = false;
+        static foreach (T; Types)
+        {
+            static if (is(T == Transceiver))
+            { /* Allowed */ }
+            else static if (is(T : Rebindable!R, R))
+                doesIt |= hasLocalAliasing!R;
+            else static if (is(T == struct))
+                doesIt |= hasLocalAliasing!(typeof(T.tupleof));
+            else
+                doesIt |= std.traits.hasUnsharedAliasing!(T);
+        }
+        return doesIt;
+    }
+
+    private template isSpawnable(F, T...)
+    {
+        template isParamsImplicitlyConvertible(F1, F2, int i = 0)
+        {
+            alias param1 = Parameters!F1;
+            alias param2 = Parameters!F2;
+            static if (param1.length != param2.length)
+                enum isParamsImplicitlyConvertible = false;
+            else static if (param1.length == i)
+                enum isParamsImplicitlyConvertible = true;
+            else static if (isImplicitlyConvertible!(param2[i], param1[i]))
+                enum isParamsImplicitlyConvertible = isParamsImplicitlyConvertible!(F1,
+                        F2, i + 1);
+            else
+                enum isParamsImplicitlyConvertible = false;
+        }
+
+        enum isSpawnable = isCallable!F && is(ReturnType!F == void)
+                && isParamsImplicitlyConvertible!(F, void function(LocalTransceiver, T))
+                && (isFunctionPointer!F || !hasUnsharedAliasing!F);
+    }
+
+    private LocalTransceiver spawnThread(F, T...)(F fn, T args)
+    if (isSpawnable!(F, T))
+    {
+        static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
+
+        auto thread_scheduler = new ThreadScheduler();
+        auto transceiver = new LocalTransceiver();
+        thread_scheduler.spawn({
+            thisLocalTransceiver = transceiver;
+            fn(transceiver, args);
+        });
+
+        return transceiver;
+    }
+}
+
+
+/*******************************************************************************
+
+    Transceiver device required for message exchange between threads.
+    Send and receive data requests, responses, commands, etc.
+
+*******************************************************************************/
+
+private class LocalTransceiver : Transceiver
+{
+
+    /// Channel of Request
+    public Channel!Message chan;
+
+    /// Ctor
+    public this () @safe nothrow
+    {
+        this.chan = new Channel!Message(64*1024);
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The `Message` to send.
+
+    ***************************************************************************/
+
+    public void send (T) (T msg) @trusted
+    in
+    {
+        assert(is (T == Message), "Only Message can be used.");
+    }
+    do
+    {
+        this.chan.send(msg);
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received `Message`
+
+    ***************************************************************************/
+
+    public T receive (T) () @trusted
+    {
+        return this.chan.receive();
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    public bool tryReceive (T) (T *msg) @trusted
+    in
+    {
+        assert(is (T == Message), "Only Message can be used.");
+    }
+    do
+    {
+        return this.chan.tryReceive(msg);
+    }
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    public void close () @trusted
+    {
+        this.chan.close();
+    }
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    public @property bool isClosed () @safe @nogc pure
+    {
+        return false;
+    }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this LocalTransceiver.
+
+    ***************************************************************************/
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "TR(%x)", cast(void*) chan);
+    }
+}
+
+/***************************************************************************
+
+    Getter of LocalTransceiver assigned to a called thread.
+
+    Returns:
+        Returns instance of `LocalTransceiver` that is created by top thread.
+
+***************************************************************************/
+
+private @property LocalTransceiver thisLocalTransceiver () nothrow
+{
+    auto p = "transceiver" in thisInfo.objects;
+    if (p !is null)
+        return cast(LocalTransceiver)*p;
+    else
+        return null;
+}
+
+
+/***************************************************************************
+
+    Setter of TransceLocalTransceiveriver assigned to a called thread.
+
+    Params:
+        value = The instance of `LocalTransceiver`.
+
+***************************************************************************/
+
+private @property void thisLocalTransceiver (LocalTransceiver value) nothrow
+{
+    thisInfo.objects["transceiver"] = value;
+}
+
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property bool thisNodeThread () nothrow
+{
+    auto p = "thisNodeThread" in thisInfo.objects;
+    if (p !is null)
+        return true;
+    else
+        return false;
+}
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisNodeThread (bool value) nothrow
+{
+    if (value)
+        thisInfo.objects["thisNodeThread"] = new Object();
+    else
+        thisInfo.objects.remove ("thisNodeThread");
+}
+
+
+/*******************************************************************************
+
+    After making the request, wait until the response comes,
+    and find the response that suits the request.
+
+*******************************************************************************/
+
+private class WaitingManager
+{
+    /// Just a Condition with a state
+    public struct Waiting
+    {
+        Condition c;
+        bool busy;
+    }
+
+    /// Request IDs waiting for a response
+    public Waiting[ulong] waiting;
+
+    /// The 'Response' we are currently processing, if any
+    public Response pending;
+
+    /***************************************************************************
+
+        Get the next available request ID
+
+        Returns:
+            request ID
+
+    ***************************************************************************/
+
+    public size_t getNextResponseId () @safe nothrow
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+
+    /***************************************************************************
+
+        Called when a waiting condition was handled and can be safely removed
+
+        Params:
+            id = request ID
+
+    ***************************************************************************/
+
+    public void remove (size_t id) @safe nothrow
+    {
+        this.waiting.remove(id);
+    }
+
+
+    /***************************************************************************
+
+        Check that a value such as the request ID already exists.
+
+        Params:
+            id = request ID
+
+        Returns:
+            Returns true if a key value equal to id exists.
+
+    ***************************************************************************/
+
+    public bool exist (size_t id) @safe nothrow
+    {
+        return ((id in this.waiting) !is null);
+    }
+
+    /***************************************************************************
+
+        Wait for a response.
+        When time out, return the response that means time out.
+
+        Params:
+            id = request ID
+            duration = Maximum time to wait
+
+        Returns:
+            Returns response data.
+
+    ***************************************************************************/
+
+    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
+    {
+        try
+        {
+            if (id !in this.waiting)
+                this.waiting[id] = Waiting(thisScheduler.newCondition(), false);
+
+            Waiting* ptr = &this.waiting[id];
+            if (ptr.busy)
+                assert(0, "Trying to override a pending request");
+
+            ptr.busy = true;
+
+            if (duration == Duration.init)
+                ptr.c.wait();
+            else if (!ptr.c.wait(duration))
+                this.pending = Response(Status.Timeout, id, "");
+
+            ptr.busy = false;
+
+            scope(exit) this.pending = Response.init;
+            return this.pending;
+        }
+        catch (Exception e)
+        {
+            import std.format;
+            assert(0, format("Exception - %s", e.message));
+        }
+    }
+}
+
+
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property WaitingManager thisWaitingManager () nothrow
+{
+    auto p = ("wmanager" in thisInfo.objects);
+    if (p !is null)
+        return cast(WaitingManager)*p;
+    else
+        return null;
+}
+
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisWaitingManager (WaitingManager value) nothrow
+{
+    thisInfo.objects["wmanager"] = value;
 }
 
 /// Simple usage example
@@ -810,7 +1306,7 @@ unittest
 unittest
 {
     import std.conv;
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import geod24.Registry;
 
     __gshared Registry registry;
@@ -849,9 +1345,9 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = registry.locate(name);
-        if (tid != tid.init)
-            return new RemoteAPI!API(tid);
+        auto transceiver = registry.locate(name);
+        if (transceiver !is null)
+            return new RemoteAPI!API(transceiver);
 
         switch (type)
         {
@@ -868,32 +1364,39 @@ unittest
         }
     }
 
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(geod24.concurrency.Tid self, geod24.concurrency.Tid parent)
-    {
-        auto node1 = factory("this does not matter", 1);
-        auto node2 = factory("neither does this", 2);
-        assert(node1.pubkey() == 42);
-        assert(node1.last() == "pubkey");
-        assert(node2.pubkey() == 0);
-        assert(node2.last() == "pubkey");
+    auto scheduler = new ThreadScheduler();
+    scheduler.spawn({
+        auto node12 = factory("this does not matter", 1);
+        auto node22 = factory("neither does this", 2);
 
-        node1.recv(42, Json.init);
-        assert(node1.last() == "recv@2");
-        node1.recv(Json.init);
-        assert(node1.last() == "recv@1");
-        assert(node2.last() == "pubkey");
-        node1.ctrl.shutdown();
-        node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
+        assert(node12.pubkey() == 42);
+        assert(node12.last() == "pubkey");
+        assert(node22.pubkey() == 0);
+        assert(node22.last() == "pubkey");
+
+        node12.recv(42, Json.init);
+        assert(node12.last() == "recv@2");
+        node12.recv(Json.init);
+        assert(node12.last() == "recv@1");
+        assert(node22.last() == "pubkey");
+
+        synchronized (mutex) {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex) {
+        condition.wait(5000.msecs);
     }
 
-    auto self = geod24.concurrency.thisTid();
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, self);
-    // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int(self);
+    node1.ctrl.shutdown();
+    node2.ctrl.shutdown();
 }
 
 /// This network have different types of nodes in it
@@ -928,9 +1431,9 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(Tid masterTid)
+        this(Transceiver masterTransceiver)
         {
-            this.master = new RemoteAPI!API(masterTid);
+            this.master = new RemoteAPI!API(masterTransceiver);
         }
 
         public override @property ulong requests()
@@ -970,6 +1473,7 @@ unittest
     }
 
     assert(nodes[0].requests() == 7);
+
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
 }
@@ -977,10 +1481,10 @@ unittest
 /// Support for circular nodes call
 unittest
 {
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import std.format;
 
-    __gshared C.Tid[string] tbn;
+    __gshared Transceiver[string] tbn;
 
     static interface API
     {
@@ -1014,7 +1518,7 @@ unittest
     ];
 
     foreach (idx, ref api; nodes)
-        tbn[format("node%d", idx)] = api.tid();
+        tbn[format("node%d", idx)] = api.ctrl.tid();
     nodes[0].setNext("node1");
     nodes[1].setNext("node2");
     nodes[2].setNext("node0");
@@ -1026,16 +1530,16 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
 }
 
-
 /// Nodes can start tasks
 unittest
 {
-    static import core.thread;
+    import core.thread;
     import core.time;
 
     static interface API
     {
         public void start ();
+        public void stop ();
         public ulong getCounter ();
     }
 
@@ -1043,7 +1547,13 @@ unittest
     {
         public override void start ()
         {
+            terminate = false;
             runTask(&this.task);
+        }
+
+        public override void stop ()
+        {
+            terminate = true;
         }
 
         public override ulong getCounter ()
@@ -1054,7 +1564,7 @@ unittest
 
         private void task ()
         {
-            while (true)
+            while (!terminate)
             {
                 this.counter++;
                 sleep(50.msecs);
@@ -1062,6 +1572,7 @@ unittest
         }
 
         private ulong counter;
+        private bool terminate;
     }
 
     import std.format;
@@ -1075,13 +1586,15 @@ unittest
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
+    node.stop();
+    core.thread.Thread.sleep(100.msecs);
     node.ctrl.shutdown();
 }
 
 // Sane name insurance policy
 unittest
 {
-    import geod24.concurrency : Tid;
+    import geod24.concurrency;
 
     static interface API
     {
@@ -1094,21 +1607,22 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node();
-    assert(node.tid == 42);
-    assert(node.ctrl.tid != Tid.init);
+    assert(node.tid() == 42);
+    assert(node.ctrl.tid() !is null);
+    node.ctrl.shutdown();
 
     static interface DoesntWork
     {
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
-    node.ctrl.shutdown();
 }
 
 // Simulate temporary outage
 unittest
 {
-    __gshared C.Tid n1tid;
+    import std.exception;
+    __gshared Transceiver n1transceive;
 
     static interface API
     {
@@ -1119,8 +1633,8 @@ unittest
     {
         public this()
         {
-            if (n1tid != C.Tid.init)
-                this.remote = new RemoteAPI!API(n1tid);
+            if (n1transceive !is null)
+                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
         }
 
         public override ulong call () { return ++this.count; }
@@ -1130,7 +1644,7 @@ unittest
     }
 
     auto n1 = RemoteAPI!API.spawn!Node();
-    n1tid = n1.tid();
+    n1transceive = n1.ctrl.tid();
     auto n2 = RemoteAPI!API.spawn!Node();
 
     /// Make sure calls are *relatively* efficient
@@ -1156,7 +1670,7 @@ unittest
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1178,7 +1692,7 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared C.Tid node_tid;
+    __gshared Transceiver node_tid;
 
     static interface API
     {
@@ -1253,7 +1767,7 @@ unittest
     }
 
     auto filtered = RemoteAPI!API.spawn!Node();
-    node_tid = filtered.tid();
+    node_tid = filtered.ctrl.tid();
 
     // caller will call filtered
     auto caller = RemoteAPI!API.spawn!Node();
@@ -1261,19 +1775,19 @@ unittest
     assert(filtered.fooCount() == 1);
 
     // both of these work
-    static assert(is(typeof(filtered.filter!(API.foo))));
-    static assert(is(typeof(filtered.filter!(filtered.foo))));
+    static assert(is(typeof(filtered.ctrl.filter!(API.foo))));
+    static assert(is(typeof(filtered.ctrl.filter!(filtered.foo))));
 
     // only method in the overload set that takes a parameter,
     // should still match a call to filter with no parameters
-    static assert(is(typeof(filtered.filter!(filtered.bar))));
+    static assert(is(typeof(filtered.ctrl.filter!(filtered.bar))));
 
     // wrong parameters => fail to compile
-    static assert(!is(typeof(filtered.filter!(filtered.bar, float))));
+    static assert(!is(typeof(filtered.ctrl.filter!(filtered.bar, float))));
     // Only `API` overload sets are considered
-    static assert(!is(typeof(filtered.filter!(filtered.bar, string))));
+    static assert(!is(typeof(filtered.ctrl.filter!(filtered.bar, string))));
 
-    filtered.filter!(API.foo);
+    filtered.ctrl.filter!(API.foo);
 
     caller.callFoo();
     assert(filtered.fooCount() == 1);  // it was not called!
@@ -1288,7 +1802,7 @@ unittest
     assert(filtered.fooIntCount() == 1);  // first time called
 
     // now filter only the int overload
-    filtered.filter!(API.foo, int);
+    filtered.ctrl.filter!(API.foo, int);
 
     // make sure the parameterless overload is still not filtered
     caller.callFoo();
@@ -1390,7 +1904,7 @@ unittest
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    import std.stdio;
+
     assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
@@ -1400,10 +1914,10 @@ unittest
 // request timeouts (foreign node to another node)
 unittest
 {
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1417,7 +1931,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
 
             // no time-out
             node.ctrl.sleep(10.msecs);
@@ -1431,8 +1945,9 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_transceiver = node_2.ctrl.tid();
     node_1.check();
+    Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
@@ -1440,10 +1955,10 @@ unittest
 // test-case for zombie responses
 unittest
 {
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1459,7 +1974,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
 
             // time-out
             node.ctrl.sleep(2000.msecs);
@@ -1473,8 +1988,9 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_transceiver = node_2.ctrl.tid();
     node_1.check();
+    Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
@@ -1482,10 +1998,10 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1499,7 +2015,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 420.msecs);
+            auto node = new RemoteAPI!API(node_transceiver, 420.msecs);
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
@@ -1510,8 +2026,9 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_transceiver = node_2.ctrl.tid();
     node_1.check();
+    Thread.sleep(1000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
@@ -1519,10 +2036,10 @@ unittest
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1536,20 +2053,20 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
+            auto node = new RemoteAPI!API(node_transceiver, 5000.msecs);
             assert(node.ping() == 42);
             // We need to return immediately so that the main thread
             // puts us to sleep
             runTask(() {
-                    node.ctrl.sleep(200.msecs);
-                    assert(node.ping() == 42);
-                });
+                node.ctrl.sleep(200.msecs);
+                assert(node.ping() == 42);
+            });
         }
     }
 
     auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_transceiver = node_2.ctrl.tid();
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
@@ -1594,7 +2111,7 @@ unittest
 {
     import core.thread : thread_joinAll;
     static import geod24.concurrency;
-    __gshared C.Tid node_tid;
+    __gshared Transceiver node_tid;
 
     static interface API
     {
