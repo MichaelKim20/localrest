@@ -858,6 +858,35 @@ struct ThreadInfo
 
 /***************************************************************************
 
+    Getter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property FiberScheduler thisScheduler () nothrow
+{
+    auto p = ("scheduler" in thisInfo.objects);
+    if (p !is null)
+        return cast(FiberScheduler)*p;
+    else
+        return null;
+}
+
+
+/***************************************************************************
+
+    Setter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisScheduler (FiberScheduler value) nothrow
+{
+    thisInfo.objects["scheduler"] = value;
+}
+
+
+
+/***************************************************************************
+
     Thread with ThreadInfo,
     It can have objects for Fiber Scheduling and Message Passing.
 
