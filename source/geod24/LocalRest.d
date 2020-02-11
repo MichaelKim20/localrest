@@ -1057,23 +1057,25 @@ unittest
 
     auto scheduler = new ThreadScheduler();
     scheduler.spawn({
-        auto node12 = factory("this does not matter", 1);
-        auto node22 = factory("neither does this", 2);
+        thisScheduler.start({
+            auto node12 = factory("this does not matter", 1);
+            auto node22 = factory("neither does this", 2);
 
-        assert(node12.pubkey() == 42);
-        assert(node12.last() == "pubkey");
-        assert(node22.pubkey() == 0);
-        assert(node22.last() == "pubkey");
+            assert(node12.pubkey() == 42);
+            assert(node12.last() == "pubkey");
+            assert(node22.pubkey() == 0);
+            assert(node22.last() == "pubkey");
 
-        node12.recv(42, Json.init);
-        assert(node12.last() == "recv@2");
-        node12.recv(Json.init);
-        assert(node12.last() == "recv@1");
-        assert(node22.last() == "pubkey");
+            node12.recv(42, Json.init);
+            assert(node12.last() == "recv@2");
+            node12.recv(Json.init);
+            assert(node12.last() == "recv@1");
+            assert(node22.last() == "pubkey");
 
-        synchronized (mutex) {
-            condition.notify;
-        }
+            synchronized (mutex) {
+                condition.notify;
+            }
+        });
     });
 
     synchronized (mutex) {
