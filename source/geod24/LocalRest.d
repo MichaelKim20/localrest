@@ -174,6 +174,7 @@ public final class RemoteAPI (API) : API
           Impl = Type of the implementation to instantiate
           args = Arguments to the object's constructor
           timeout = (optional) timeout to use with requests
+          reuse_pipeline = Reuse of message pipeline
 
         Returns:
           A `RemoteAPI` owning the node reference
@@ -181,10 +182,10 @@ public final class RemoteAPI (API) : API
     ***************************************************************************/
 
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
-        Duration timeout = Duration.init)
+        Duration timeout = Duration.init, bool reuse_pipeline = true)
     {
         auto childChannel = spawnThread(&spawned!(Impl), args);
-        return new RemoteAPI(childChannel, true, timeout);
+        return new RemoteAPI(childChannel, true, timeout, reuse_pipeline);
     }
 
     /// Helper template to get the constructor's parameters
@@ -406,6 +407,12 @@ public final class RemoteAPI (API) : API
     /// Timeout to use when issuing requests
     private const Duration timeout;
 
+    /// Storage of Message Pipeline, Save what has already been created.
+    private MessagePipelineRegistry registry;
+
+    /// Reuse of message pipeline
+    private bool reuse_pipeline;
+
     // Vibe.d mandates that method must be @safe
     @safe:
 
@@ -419,20 +426,24 @@ public final class RemoteAPI (API) : API
         Params:
             channel = `MessageChannel` of the node.
             timeout = any timeout to use
+            reuse_pipeline = Reuse of message pipeline
 
     ***************************************************************************/
 
-    public this (MessageChannel channel, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (MessageChannel channel, Duration timeout = Duration.init, bool reuse = true) nothrow
     {
-        this(channel, false, timeout);
+        this(channel, false, timeout, reuse);
     }
 
     /// Private overload used by `spawn`
-    private this (MessageChannel channel, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (MessageChannel channel, bool isOwner, Duration timeout, bool reuse) nothrow
     {
         this.childChannel = channel;
         this.owner = isOwner;
         this.timeout = timeout;
+        this.reuse_pipeline = reuse;
+
+        this.registry.initialize();
     }
 
 
@@ -619,22 +630,45 @@ public final class RemoteAPI (API) : API
                         Response res;
 
                         void doWork ()
-                    {
-                            auto producer = new MessageChannel(1);
-                            auto consumer = new MessageChannel(1);
-                            auto pipe = new MessagePipeline(this.childChannel, producer, consumer);
-                            pipe.open();
+                        {
+                            if (this.reuse_pipeline)
+                            {
+                                auto pipe = this.registry.locate();
+                                if ((pipe is null) || ((pipe !is null) && (pipe.isBusy)))
+                                {
+                                    auto producer = new MessageChannel(1);
+                                    auto consumer = new MessageChannel(1);
+                                    pipe = new MessagePipeline(this.childChannel, producer, consumer);
+                                    pipe.open();
+                                    this.registry.register(pipe);
+                                }
 
-                            auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
-                            auto msg_res = pipe.query(msg_req, this.timeout);
+                                auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
+                                auto msg_res = pipe.query(msg_req, this.timeout);
 
-                            if (msg_res.tag == Message.Type.response)
-                                res = msg_res.res;
+                                if (msg_res.tag == Message.Type.response)
+                                    res = msg_res.res;
+                                else
+                                    assert(0, "Not expected message type");
+                            }
                             else
-                                assert(0, "Not expected message type");
+                            {
+                                auto producer = new MessageChannel(1);
+                                auto consumer = new MessageChannel(1);
+                                auto pipe = new MessagePipeline(this.childChannel, producer, consumer);
+                                pipe.open();
 
-                            if (res.status == Status.Success)
-                                pipe.close();
+                                auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
+                                auto msg_res = pipe.query(msg_req, this.timeout);
+
+                                if (msg_res.tag == Message.Type.response)
+                                    res = msg_res.res;
+                                else
+                                    assert(0, "Not expected message type");
+
+                                if (res.status == Status.Success)
+                                    pipe.close();
+                            }
                         }
 
                         auto scheduler = thisScheduler;
