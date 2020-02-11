@@ -10,11 +10,13 @@ module geod24.LocalRestType;
 import geod24.concurrency;
 import core.time;
 
+public alias MessageChannel = Channel!Message;
+
 /// Data sent by the caller
 public struct Command
 {
-    /// Transceiver of the sender thread
-    Transceiver sender;
+    /// MessageChannel of the sender thread
+    MessageChannel sender;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response`
     /// Initialized to `size_t.max` so not setting it crashes the program
@@ -250,4 +252,38 @@ public @property Transceiver thisTransceiver () nothrow
 public @property void thisTransceiver (Transceiver value) nothrow
 {
     thisInfo.objects["transceiver"] = value;
+}
+
+
+/***************************************************************************
+
+    Getter of MessageChannel assigned to a called thread.
+
+    Returns:
+        Returns instance of `MessageChannel` that is created by top thread.
+
+***************************************************************************/
+
+public @property MessageChannel thisMessageChannel () nothrow
+{
+    auto p = "messagechannel" in thisInfo.objects;
+    if (p !is null)
+        return cast(MessageChannel)*p;
+    else
+        return null;
+}
+
+
+/***************************************************************************
+
+    Setter of MessageChannel assigned to a called thread.
+
+    Params:
+        value = The instance of `MessageChannel`.
+
+***************************************************************************/
+
+public @property void thisMessageChannel (MessageChannel value) nothrow
+{
+    thisInfo.objects["messagechannel"] = value;
 }
