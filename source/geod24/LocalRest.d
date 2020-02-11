@@ -625,7 +625,7 @@ public final class RemoteAPI (API) : API
                             auto pipe = new MessagePipeline(this.childChannel, producer, consumer);
                             pipe.open();
 
-                            auto msg_req = Message(Command(this.childChannel, pipe.getId(), ovrld.mangleof, serialized));
+                            auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
                             auto msg_res = pipe.query(msg_req, this.timeout);
 
                             if (msg_res.tag == Message.Type.response)
