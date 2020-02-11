@@ -217,7 +217,10 @@ private
 
     @property ref ThreadInfo thisInfo() nothrow
     {
-        return ThreadInfo.thisInfo;
+        if (auto t = cast(InfoThread)Thread.getThis())
+            return t.info;
+        else
+            return ThreadInfo.thisInfo;
     }
 }
 
