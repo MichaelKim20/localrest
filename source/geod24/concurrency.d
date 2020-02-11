@@ -1123,3 +1123,41 @@ unittest
         });
     });
 }
+
+// The teacher and producer/consumer model
+unittest
+{
+    void mainThreadTask(FiberScheduler scheduler)
+    {
+        // Create a channel, the teacher model
+        auto channel1 = new Channel!int(0);
+        scheduler.spawn({
+            // This will block until channel1 has been written to
+            int value = channel1.receive();
+            channel1.send(value*value);
+        });
+        // This will block (the fiber) until channel1 has been read
+        channel1.send(2);
+        // This will block until there is data in channel1 to be read
+        assert(4 == channel1.receive());
+
+
+        int[] results;
+        // Create a channel, the producer, consumer model
+        auto channel2 = new Channel!int(0);
+        scheduler.spawn({
+            while (results.length < 10)
+                results ~= channel2.receive();
+        });
+        foreach (idx; 0..10)
+            channel2.send(idx);
+        assert(results == [0,1,2,3,4,5,6,7,8,9]);
+    }
+
+
+    /// Create and Register FiberScheduler of main thread
+    thisScheduler = new FiberScheduler();
+    thisScheduler.start({
+        mainThreadTask(thisScheduler);
+    });
+}
