@@ -60,7 +60,7 @@
 
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
-    to the Transceiver. Messages consist of the sender's Transceiver,
+    to the MessageChannel. Messages consist of the sender's MessageChannel,
     the mangled name of the function to call (to support overloading)
     and the arguments, serialized as a JSON string.
 
@@ -161,7 +161,7 @@ public final class RemoteAPI (API) : API
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `Transceiver`
+        In practice, this means there should only be one `MessageChannel`
         per "address".
 
         Note:
@@ -183,8 +183,8 @@ public final class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        auto childTransceiver = spawnThread(&spawned!(Impl), args);
-        return new RemoteAPI(childTransceiver, true, timeout);
+        auto childChannel = spawnThread(&spawned!(Impl), args);
+        return new RemoteAPI(childChannel, true, timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -270,7 +270,7 @@ public final class RemoteAPI (API) : API
         Main dispatch function
 
         This function receive string-serialized messages from the calling thread,
-        which is a struct with the sender's Transceiver, the method's mangleof,
+        which is a struct with the sender's MessageChannel, the method's mangleof,
         and the method's arguments as a tuple, serialized to a JSON string.
 
         Params:
@@ -279,7 +279,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void spawned (Implementation) (Transceiver self, CtorParams!Implementation cargs)
+    private static void spawned (Implementation) (MessageChannel self, CtorParams!Implementation cargs)
     {
         import std.container;
         import std.datetime.systime : Clock, SysTime;
@@ -297,7 +297,7 @@ public final class RemoteAPI (API) : API
 
         auto node = new Implementation(cargs);
         auto wmanager = new WaitingManager();
-        scope transceiver = self;
+        scope channel = self;
         scope scheduler = thisScheduler;
 
         thisWaitingManager = wmanager;
@@ -331,7 +331,7 @@ public final class RemoteAPI (API) : API
             while (!terminate)
             {
                 Message msg;
-                if (transceiver.tryReceive(&msg))
+                if (channel.tryReceive(&msg))
                 {
                     switch (msg.tag)
                     {
@@ -399,7 +399,7 @@ public final class RemoteAPI (API) : API
     }
 
     /// A device that can requests.
-    private Transceiver childTransceiver;
+    private MessageChannel childChannel;
 
     /// Whether or not the destructor should destroy the thread
     private bool owner;
@@ -418,20 +418,20 @@ public final class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-            transceiver = `Transceiver` of the node.
+            channel = `MessageChannel` of the node.
             timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (Transceiver transceiver, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (MessageChannel channel, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this(transceiver, false, timeout);
+        this(channel, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (Transceiver transceiver, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (MessageChannel channel, bool isOwner, Duration timeout) @nogc pure nothrow
     {
-        this.childTransceiver = transceiver;
+        this.childChannel = channel;
         this.owner = isOwner;
         this.timeout = timeout;
     }
@@ -455,24 +455,24 @@ public final class RemoteAPI (API) : API
     {
         /***********************************************************************
 
-            Returns the `Transceiver`
+            Returns the `MessageChannel`
 
         ***********************************************************************/
 
-        public Transceiver transceiver () @nogc pure nothrow
+        public MessageChannel channel () @nogc pure nothrow
         {
-            return this.childTransceiver;
+            return this.childChannel;
         }
 
         /***********************************************************************
 
-            Returns the `Transceiver`
+            Returns the `MessageChannel`
 
         ***********************************************************************/
 
-        public Transceiver tid () @nogc pure nothrow
+        public MessageChannel tid () @nogc pure nothrow
         {
-            return this.childTransceiver;
+            return this.childChannel;
         }
 
         /***********************************************************************
@@ -483,7 +483,7 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            this.childTransceiver.send(Message(ShutdownCommand()));
+            this.childChannel.send(Message(ShutdownCommand()));
         }
 
         /***********************************************************************
@@ -504,7 +504,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            this.childTransceiver.send(Message(TimeCommand(d, dropMessages)));
+            this.childChannel.send(Message(TimeCommand(d, dropMessages)));
         }
 
         /***********************************************************************
@@ -585,7 +585,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            this.childTransceiver.send(Message(FilterAPI(mangled, pretty)));
+            this.childChannel.send(Message(FilterAPI(mangled, pretty)));
         }
 
 
@@ -597,7 +597,7 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            this.childTransceiver.send(Message(FilterAPI("")));
+            this.childChannel.send(Message(FilterAPI("")));
         }
     }
 
@@ -630,15 +630,15 @@ public final class RemoteAPI (API) : API
                                 thisWaitingManager = wmanager;
                             }
 
-                            auto transceiver = thisTransceiver;
-                            if (transceiver is null)
+                            auto channel = thisMessageChannel;
+                            if (channel is null)
                             {
-                                transceiver = new Transceiver();
-                                thisTransceiver = transceiver;
+                                channel = new MessageChannel();
+                                thisMessageChannel = channel;
                             }
 
-                            command = Command(transceiver, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
-                            this.childTransceiver.send(Message(command));
+                            command = Command(channel, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childChannel.send(Message(command));
 
                             res = wmanager.waitResponse(command.id, this.timeout);
                         }
@@ -660,25 +660,25 @@ public final class RemoteAPI (API) : API
                                 thisWaitingManager = wmanager;
                             }
 
-                            auto transceiver = thisTransceiver;
-                            if (transceiver is null)
+                            auto channel = thisMessageChannel;
+                            if (channel is null)
                             {
-                                transceiver = new Transceiver();
-                                thisTransceiver = transceiver;
+                                channel = new MessageChannel();
+                                thisMessageChannel = channel;
                             }
 
                             bool terminated = false;
-                            command = Command(transceiver, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
+                            command = Command(channel, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             scheduler.spawn({
-                                this.childTransceiver.send(Message(command));
+                                this.childChannel.send(Message(command));
                             });
 
                             scheduler.spawn({
                                 Message msg;
                                 while (!terminated)
                                 {
-                                    if (transceiver.tryReceive(&msg))
+                                    if (channel.tryReceive(&msg))
                                     {
                                         scope c = scheduler.newCondition();
                                         foreach (_; 0..10)
@@ -733,7 +733,7 @@ private
         bool doesIt = false;
         static foreach (T; Types)
         {
-            static if (is(T == Transceiver))
+            static if (is(T == MessageChannel))
             { /* Allowed */ }
             else static if (is(T : Rebindable!R, R))
                 doesIt |= hasLocalAliasing!R;
@@ -763,23 +763,23 @@ private
         }
 
         enum isSpawnable = isCallable!F && is(ReturnType!F == void)
-                && isParamsImplicitlyConvertible!(F, void function(Transceiver, T))
+                && isParamsImplicitlyConvertible!(F, void function(MessageChannel, T))
                 && (isFunctionPointer!F || !hasUnsharedAliasing!F);
     }
 
-    private Transceiver spawnThread(F, T...)(F fn, T args)
+    private MessageChannel spawnThread(F, T...)(F fn, T args)
     if (isSpawnable!(F, T))
     {
         static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
 
         auto thread_scheduler = new ThreadScheduler();
-        auto transceiver = new Transceiver();
+        auto channel = new MessageChannel(4096);
         thread_scheduler.spawn({
-            thisTransceiver = transceiver;
-            fn(transceiver, args);
+            thisMessageChannel = channel;
+            fn(channel, args);
         });
 
-        return transceiver;
+        return channel;
     }
 }
 
@@ -1030,9 +1030,9 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto transceiver = registry.locate(name);
-        if (transceiver !is null)
-            return new RemoteAPI!API(transceiver);
+        auto channel = registry.locate(name);
+        if (channel !is null)
+            return new RemoteAPI!API(channel);
 
         switch (type)
         {
@@ -1118,9 +1118,9 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(Transceiver masterTransceiver)
+        this(MessageChannel master_chan)
         {
-            this.master = new RemoteAPI!API(masterTransceiver);
+            this.master = new RemoteAPI!API(master_chan);
         }
 
         public override @property ulong requests()
@@ -1171,7 +1171,7 @@ unittest
     import geod24.concurrency;
     import std.format;
 
-    __gshared Transceiver[string] tbn;
+    __gshared MessageChannel[string] tbn;
 
     static interface API
     {
@@ -1309,7 +1309,7 @@ unittest
 unittest
 {
     import std.exception;
-    __gshared Transceiver n1transceive;
+    __gshared MessageChannel n1_chan;
 
     static interface API
     {
@@ -1320,8 +1320,8 @@ unittest
     {
         public this()
         {
-            if (n1transceive !is null)
-                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
+            if (n1_chan !is null)
+                this.remote = new RemoteAPI!API(n1_chan, 1.seconds);
         }
 
         public override ulong call () { return ++this.count; }
@@ -1331,7 +1331,7 @@ unittest
     }
 
     auto n1 = RemoteAPI!API.spawn!Node();
-    n1transceive = n1.ctrl.tid();
+    n1_chan = n1.ctrl.tid();
     auto n2 = RemoteAPI!API.spawn!Node();
 
     /// Make sure calls are *relatively* efficient
@@ -1379,7 +1379,7 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared Transceiver node_tid;
+    __gshared MessageChannel node_chan;
 
     static interface API
     {
@@ -1403,7 +1403,7 @@ unittest
 
         public this()
         {
-            this.remote = new RemoteAPI!API(node_tid);
+            this.remote = new RemoteAPI!API(node_chan);
         }
 
         override size_t fooCount() { return this.foo_count; }
@@ -1454,7 +1454,7 @@ unittest
     }
 
     auto filtered = RemoteAPI!API.spawn!Node();
-    node_tid = filtered.ctrl.tid();
+    node_chan = filtered.ctrl.tid();
 
     // caller will call filtered
     auto caller = RemoteAPI!API.spawn!Node();
@@ -1604,7 +1604,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_chan;
 
     static interface API
     {
@@ -1618,7 +1618,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
+            auto node = new RemoteAPI!API(node_chan, 500.msecs);
 
             // no time-out
             node.ctrl.sleep(10.msecs);
@@ -1632,7 +1632,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_chan = node_2.ctrl.tid();
     node_1.check();
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
@@ -1645,7 +1645,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_chan;
 
     static interface API
     {
@@ -1661,7 +1661,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
+            auto node = new RemoteAPI!API(node_chan, 500.msecs);
 
             // time-out
             node.ctrl.sleep(2000.msecs);
@@ -1675,7 +1675,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_chan = node_2.ctrl.tid();
     node_1.check();
     Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
@@ -1688,7 +1688,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_chan;
 
     static interface API
     {
@@ -1702,7 +1702,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 420.msecs);
+            auto node = new RemoteAPI!API(node_chan, 420.msecs);
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
@@ -1713,7 +1713,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_chan = node_2.ctrl.tid();
     node_1.check();
     Thread.sleep(1000.msecs);
     node_1.ctrl.shutdown();
@@ -1726,7 +1726,7 @@ unittest
     import geod24.concurrency;
     import std.exception;
 
-    __gshared Transceiver node_transceiver;
+    __gshared MessageChannel node_chan;
 
     static interface API
     {
@@ -1740,7 +1740,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_transceiver, 5000.msecs);
+            auto node = new RemoteAPI!API(node_chan, 5000.msecs);
             assert(node.ping() == 42);
             // We need to return immediately so that the main thread
             // puts us to sleep
@@ -1753,7 +1753,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_transceiver = node_2.ctrl.tid();
+    node_chan = node_2.ctrl.tid();
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
@@ -1798,7 +1798,7 @@ unittest
 {
     import core.thread : thread_joinAll;
     static import geod24.concurrency;
-    __gshared Transceiver node_tid;
+    __gshared MessageChannel node_chan;
 
     static interface API
     {
@@ -1817,7 +1817,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid);
+            auto node = new RemoteAPI!API(node_chan);
 
             // We need to return immediately so that the main thread can continue testing
             runTask(() {
@@ -1829,7 +1829,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_chan = node_2.tid;
     node_1.check();
     node_2.ctrl.shutdown();  // shut it down before wake-up, segfault() command will be ignored
     node_1.ctrl.shutdown();
