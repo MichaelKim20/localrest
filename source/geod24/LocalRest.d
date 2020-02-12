@@ -83,6 +83,7 @@ import vibe.data.json;
 import geod24.concurrency;
 import geod24.LocalRestType;
 
+import std.algorithm;
 import std.meta : AliasSeq;
 import std.traits;
 
@@ -341,6 +342,7 @@ public final class RemoteAPI (API) : API
                             break;
 
                         case Message.Type.destoy_pipe_command :
+                            pipeline.close();
                             pipe_terminate = true;
                             break;
 
@@ -421,6 +423,9 @@ public final class RemoteAPI (API) : API
 
     /// Storage of Message Pipeline, Save what has already been created.
     private MessagePipelineRegistry registry;
+
+    /// Collection of all created message pipeline
+    private bool[MessagePipeline] pipeline_collection;
 
     // Vibe.d mandates that method must be @safe
     @safe:
@@ -519,7 +524,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            this.childChannel.send(Message(TimeCommand(d, dropMessages)));
+            sendControlMessage(Message(TimeCommand(d, dropMessages)));
         }
 
         /***********************************************************************
@@ -600,7 +605,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            this.childChannel.send(Message(FilterAPI(mangled, pretty)));
+            sendControlMessage(Message(FilterAPI(mangled, pretty)));
         }
 
 
@@ -612,7 +617,20 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            this.childChannel.send(Message(FilterAPI("")));
+            sendControlMessage(Message(FilterAPI("")));
+        }
+
+
+        /***********************************************************************
+
+            Clear out any filtering set by a call to filter()
+
+        ***********************************************************************/
+
+        private void sendControlMessage (Message msg) @trusted
+        {
+            this.childChannel.send(msg);
+            this.pipeline_collection.keys.filter!(p => !p.isClosed).each!(p => p.consumer.send(msg));
         }
     }
 
@@ -637,11 +655,12 @@ public final class RemoteAPI (API) : API
                         void doWork ()
                         {
                             auto pipe = this.registry.locate();
-                            if ((pipe is null) || ((pipe !is null) && (pipe.isBusy)))
+                            if ((pipe is null) || ((pipe !is null) && ((pipe.isBusy) || (pipe.isClosed))))
                             {
                                 pipe = new MessagePipeline(this.childChannel);
                                 pipe.open();
                                 this.registry.register(pipe);
+                                this.pipeline_collection[pipe] = true;
                             }
 
                             auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
