@@ -134,6 +134,15 @@ public struct Message
 }
 
 
+public alias OnCloseHandler = scope void delegate
+    (MessagePipeline pipeline) @safe nothrow;
+
+shared struct AtomicLock
+{
+    void lock() { while (!cas(&locked, false, true)) { Thread.yield(); } }
+    void unlock() { atomicStore!(MemoryOrder.rel)(locked, false); }
+    bool locked;
+}
 /*******************************************************************************
 
     It has two channels.
@@ -166,6 +175,12 @@ public class MessagePipeline
     /// This value is true if another request is already in progress.
     private bool busy;
 
+    /// Handler of on close
+    private OnCloseHandler onclose;
+
+    private bool closing_soon;
+
+    private AtomicLock alock;
 
     /***********************************************************************
 
@@ -176,9 +191,9 @@ public class MessagePipeline
 
     ***********************************************************************/
 
-    public this (MessageChannel root_chan)
+    public this (MessageChannel root_chan, OnCloseHandler onclose = null)
     {
-        this (root_chan, new MessageChannel(256), new MessageChannel(256));
+        this (root_chan, new MessageChannel(256), new MessageChannel(256), onclose);
     }
 
 
@@ -193,14 +208,16 @@ public class MessagePipeline
 
     ***********************************************************************/
 
-    public this (MessageChannel root_chan, MessageChannel producer, MessageChannel consumer)
+    public this (MessageChannel root_chan, MessageChannel producer, MessageChannel consumer, OnCloseHandler onclose = null)
     {
         this.producer = producer;
         this.consumer = consumer;
 
         this.closed = true;
         this.busy = false;
+        this.closing_soon = true;
         this.root_chan = root_chan;
+        this.onclose = onclose;
 
         this.name = format("%x", thisThreadID);
     }
@@ -214,6 +231,9 @@ public class MessagePipeline
 
     public void open ()
     {
+        alock.lock();
+        scope (exit) alock.unlock();
+
         this.root_chan.send(Message(CreatePipeCommand(this)));
         this.closed = false;
     }
@@ -227,8 +247,14 @@ public class MessagePipeline
 
     public void close ()
     {
+        alock.lock();
+        scope (exit) alock.unlock();
+
         this.consumer.send(Message(DestroyPipeCommand()));
         this.closed = true;
+
+        if (this.onclose)
+            this.onclose(this);
     }
 
 
@@ -326,6 +352,22 @@ public class MessagePipeline
         return this.busy;
     }
 
+
+    public @property void isClosingSoon (bool value) @safe @nogc pure
+    {
+        alock.lock();
+        scope (exit) alock.unlock();
+
+        this.closing_soon = value;
+    }
+
+    public @property bool isClosingSoon () @safe @nogc pure
+    {
+        alock.lock();
+        scope (exit) alock.unlock();
+
+        return this.closing_soon;
+    }
 
     /***************************************************************************
 

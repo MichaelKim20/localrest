@@ -657,7 +657,14 @@ public final class RemoteAPI (API) : API
                             auto pipe = this.registry.locate();
                             if ((pipe is null) || ((pipe !is null) && ((pipe.isBusy) || (pipe.isClosed))))
                             {
-                                pipe = new MessagePipeline(this.childChannel);
+                                if (pipe)
+                                {
+
+                                }
+
+                                pipe = new MessagePipeline(this.childChannel, (p) {
+                                   this.pipeline_collection.remove(p);
+                                });
                                 pipe.open();
                                 this.registry.register(pipe);
                                 this.pipeline_collection[pipe] = true;
