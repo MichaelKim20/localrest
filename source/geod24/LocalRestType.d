@@ -139,8 +139,8 @@ public alias OnCloseHandler = scope void delegate
 
 shared struct AtomicLock
 {
-    void lock() { while (!cas(&locked, false, true)) { Thread.yield(); } }
-    void unlock() { atomicStore!(MemoryOrder.rel)(locked, false); }
+    void lock() @safe @nogc pure { while (!cas(&locked, false, true)) { } }
+    void unlock() @safe @nogc pure{ atomicStore!(MemoryOrder.rel)(locked, false); }
     bool locked;
 }
 /*******************************************************************************

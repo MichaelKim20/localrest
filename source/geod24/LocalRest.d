@@ -658,9 +658,7 @@ public final class RemoteAPI (API) : API
                             if ((pipe is null) || ((pipe !is null) && ((pipe.isBusy) || (pipe.isClosed))))
                             {
                                 if (pipe)
-                                {
-
-                                }
+                                    pipe.isClosingSoon = true;
 
                                 pipe = new MessagePipeline(this.childChannel, (p) {
                                    this.pipeline_collection.remove(p);
@@ -677,6 +675,9 @@ public final class RemoteAPI (API) : API
                                 res = msg_res.res;
                             else
                                 assert(0, "Not expected message type");
+
+                            if (pipe.isClosingSoon)
+                                pipe.close();
                         }
 
                         auto scheduler = thisScheduler;
