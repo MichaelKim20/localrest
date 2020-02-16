@@ -130,6 +130,59 @@ unittest
 {
     import std.conv;
 
+    static void spawned (MessageChannel self)
+    {
+        scope scheduler = thisScheduler;
+        scope channel = self;
+        bool terminate = false;
+
+        scheduler.start({
+            while (!terminate)
+            {
+                Message msg = channel.receive();
+                if (msg.convertsTo!(Command))
+                {
+                    auto cmd = msg.data.peek!(Command);
+                    if (cmd.method == "pow")
+                    {
+                        immutable int value = to!int(cmd.args);
+                        auto msg_res = toMessage(Response(Status.Success, 0, to!string(value * value)));
+                        cmd.sender.send(msg_res);
+                    }
+                    else
+                    {
+                        assert(0, "Unmatched method name: " ~ cmd.method);
+                    }
+                }
+                else if (msg.convertsTo!(Shutdown))
+                {
+                    terminate = true;
+                }
+                else
+                {
+                    assert(0, "Unexpected type");
+                }
+            }
+        });
+    }
+
+    auto node = spawnThread(&spawned);
+
+    auto client = new MessageChannel(256);
+    auto msg_cmd = toMessage(Command(client, 0, "pow", "2"));
+    node.send(msg_cmd);
+
+    auto res_msg = client.receive();
+    auto res = res_msg.data.peek!(Response);
+    assert(res.data == "4");
+
+    shutdown(node);
+}
+
+unittest
+{
+    import std.conv;
+
     static void handleCommand (Command cmd)
     {
         if (cmd.method == "pow")
