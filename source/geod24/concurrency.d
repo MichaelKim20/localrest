@@ -76,155 +76,153 @@ import std.traits;
     assert(received == "Received the number 42");
 }
 
-private
+bool hasLocalAliasing(Types...)()
 {
-    bool hasLocalAliasing(Types...)()
-    {
-        import std.typecons : Rebindable;
+    import std.typecons : Rebindable;
 
-        // Works around "statement is not reachable"
-        bool doesIt = false;
-        static foreach (T; Types)
+    // Works around "statement is not reachable"
+    bool doesIt = false;
+    static foreach (T; Types)
+    {
+        static if (is(T == Tid))
+        { /* Allowed */ }
+        else static if (is(T : Rebindable!R, R))
+            doesIt |= hasLocalAliasing!R;
+        else static if (is(T == struct))
+            doesIt |= hasLocalAliasing!(typeof(T.tupleof));
+        else
+            doesIt |= std.traits.hasUnsharedAliasing!(T);
+    }
+    return doesIt;
+}
+
+@safe unittest
+{
+    static struct Container { Tid t; }
+    static assert(!hasLocalAliasing!(Tid, Container, int));
+}
+
+@safe unittest
+{
+    /* Issue 20097 */
+    import std.datetime.systime : SysTime;
+    static struct Container { SysTime time; }
+    static assert(!hasLocalAliasing!(SysTime, Container));
+}
+
+enum MsgType
+{
+    standard,
+    linkDead,
+}
+
+struct Message
+{
+    MsgType type;
+    Variant data;
+
+    this(T...)(MsgType t, T vals) if (T.length > 0)
+    {
+        static if (T.length == 1)
         {
-            static if (is(T == Tid))
-            { /* Allowed */ }
-            else static if (is(T : Rebindable!R, R))
-                doesIt |= hasLocalAliasing!R;
-            else static if (is(T == struct))
-                doesIt |= hasLocalAliasing!(typeof(T.tupleof));
+            type = t;
+            data = vals[0];
+        }
+        else
+        {
+            import std.typecons : Tuple;
+
+            type = t;
+            data = Tuple!(T)(vals);
+        }
+    }
+
+    @property auto convertsTo(T...)()
+    {
+        static if (T.length == 1)
+        {
+            return is(T[0] == Variant) || data.convertsTo!(T);
+        }
+        else
+        {
+            import std.typecons : Tuple;
+            return data.convertsTo!(Tuple!(T));
+        }
+    }
+
+    @property auto get(T...)()
+    {
+        static if (T.length == 1)
+        {
+            static if (is(T[0] == Variant))
+                return data;
             else
-                doesIt |= std.traits.hasUnsharedAliasing!(T);
+                return data.get!(T);
         }
-        return doesIt;
-    }
-
-    @safe unittest
-    {
-        static struct Container { Tid t; }
-        static assert(!hasLocalAliasing!(Tid, Container, int));
-    }
-
-    @safe unittest
-    {
-        /* Issue 20097 */
-        import std.datetime.systime : SysTime;
-        static struct Container { SysTime time; }
-        static assert(!hasLocalAliasing!(SysTime, Container));
-    }
-
-    enum MsgType
-    {
-        standard,
-        linkDead,
-    }
-
-    struct Message
-    {
-        MsgType type;
-        Variant data;
-
-        this(T...)(MsgType t, T vals) if (T.length > 0)
+        else
         {
-            static if (T.length == 1)
-            {
-                type = t;
-                data = vals[0];
-            }
+            import std.typecons : Tuple;
+            return data.get!(Tuple!(T));
+        }
+    }
+
+    auto map(Op)(Op op)
+    {
+        alias Args = Parameters!(Op);
+
+        static if (Args.length == 1)
+        {
+            static if (is(Args[0] == Variant))
+                return op(data);
             else
-            {
-                import std.typecons : Tuple;
-
-                type = t;
-                data = Tuple!(T)(vals);
-            }
+                return op(data.get!(Args));
         }
-
-        @property auto convertsTo(T...)()
+        else
         {
-            static if (T.length == 1)
-            {
-                return is(T[0] == Variant) || data.convertsTo!(T);
-            }
-            else
-            {
-                import std.typecons : Tuple;
-                return data.convertsTo!(Tuple!(T));
-            }
+            import std.typecons : Tuple;
+            return op(data.get!(Tuple!(Args)).expand);
         }
-
-        @property auto get(T...)()
-        {
-            static if (T.length == 1)
-            {
-                static if (is(T[0] == Variant))
-                    return data;
-                else
-                    return data.get!(T);
-            }
-            else
-            {
-                import std.typecons : Tuple;
-                return data.get!(Tuple!(T));
-            }
-        }
-
-        auto map(Op)(Op op)
-        {
-            alias Args = Parameters!(Op);
-
-            static if (Args.length == 1)
-            {
-                static if (is(Args[0] == Variant))
-                    return op(data);
-                else
-                    return op(data.get!(Args));
-            }
-            else
-            {
-                import std.typecons : Tuple;
-                return op(data.get!(Tuple!(Args)).expand);
-            }
-        }
-    }
-
-    void checkops(T...)(T ops)
-    {
-        import std.format : format;
-
-        foreach (i, t1; T)
-        {
-            static assert(isFunctionPointer!t1 || isDelegate!t1,
-                    format!"T %d is not a function pointer or delegates"(i));
-            alias a1 = Parameters!(t1);
-            alias r1 = ReturnType!(t1);
-
-            static if (i < T.length - 1 && is(r1 == void))
-            {
-                static assert(a1.length != 1 || !is(a1[0] == Variant),
-                              "function with arguments " ~ a1.stringof ~
-                              " occludes successive function");
-
-                foreach (t2; T[i + 1 .. $])
-                {
-                    alias a2 = Parameters!(t2);
-
-                    static assert(!is(a1 == a2),
-                        "function with arguments " ~ a1.stringof ~ " occludes successive function");
-                }
-            }
-        }
-    }
-
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        auto t = cast(InfoThread)Thread.getThis();
-
-        if (t !is null)
-            return t.info;
-
-        return ThreadInfo.thisInfo;
     }
 }
+
+void checkops(T...)(T ops)
+{
+    import std.format : format;
+
+    foreach (i, t1; T)
+    {
+        static assert(isFunctionPointer!t1 || isDelegate!t1,
+                format!"T %d is not a function pointer or delegates"(i));
+        alias a1 = Parameters!(t1);
+        alias r1 = ReturnType!(t1);
+
+        static if (i < T.length - 1 && is(r1 == void))
+        {
+            static assert(a1.length != 1 || !is(a1[0] == Variant),
+                            "function with arguments " ~ a1.stringof ~
+                            " occludes successive function");
+
+            foreach (t2; T[i + 1 .. $])
+            {
+                alias a2 = Parameters!(t2);
+
+                static assert(!is(a1 == a2),
+                    "function with arguments " ~ a1.stringof ~ " occludes successive function");
+            }
+        }
+    }
+}
+
+@property ref ThreadInfo thisInfo() nothrow
+{
+    auto t = cast(InfoThread)Thread.getThis();
+
+    if (t !is null)
+        return t.info;
+
+    return ThreadInfo.thisInfo;
+}
+
 
 static ~this()
 {
