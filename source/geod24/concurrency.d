@@ -945,6 +945,8 @@ public class InfoThread : Thread
  */
 class FiberScheduler
 {
+    private bool dispatching;
+
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
@@ -1101,6 +1103,11 @@ private:
     void dispatch()
     {
         import std.algorithm.mutation : remove;
+
+        assert(!this.dispatching, "Already called start. Scheduling already started.");
+
+        this.dispatching = true;
+        scope (exit) this.dispatching = false;
 
         while (m_fibers.length > 0)
         {
